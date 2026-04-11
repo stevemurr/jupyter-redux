@@ -6,7 +6,7 @@
     <title>Environment - Jupyter Redux</title>
     <link rel="stylesheet" href="/static/css/style.css">
 
-    <!-- CodeMirror 6 for file editor -->
+    <!-- CodeMirror 6 for file editor + notebook cells -->
     <script type="module">
         import {
             EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
@@ -43,7 +43,7 @@
     </header>
 
     <div class="env-layout">
-        <!-- File tree sidebar -->
+        <!-- Sidebar -->
         <div class="env-sidebar">
             <div class="sidebar-header">
                 <h3>Files</h3>
@@ -70,23 +70,22 @@
                 <div class="file-tree-empty" id="repo-list-empty">No repos cloned</div>
             </div>
 
-            <!-- Notebooks list in sidebar -->
+            <!-- Notebooks -->
             <div class="sidebar-header" style="margin-top:auto;">
                 <h3>Notebooks</h3>
                 <div class="sidebar-actions">
                     <button id="new-notebook-btn" title="New notebook">+ New</button>
                 </div>
             </div>
-            <div id="notebook-list" style="padding:4px 0;overflow-y:auto;max-height:200px;">
-            </div>
+            <div id="notebook-list" style="padding:4px 0;overflow-y:auto;max-height:200px;"></div>
         </div>
 
-        <!-- File editor main area -->
+        <!-- Main editor area -->
         <div class="env-main">
             <div class="editor-tabs" id="editor-tabs"></div>
-            <div class="file-editor-area" id="file-editor-area">
+            <div class="file-editor-area" id="editor-area">
                 <div class="file-editor-placeholder" id="editor-placeholder">
-                    Select a file to edit, or create a new one.
+                    Select a file or notebook from the sidebar.
                 </div>
             </div>
             <div class="file-editor-status" id="editor-status">
@@ -147,21 +146,24 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js?v=5"></script>
+    <script src="/static/js/app.js?v=6"></script>
+    <script src="/static/js/ws.js?v=6"></script>
     <script>
     (function() {
         const envId = window.location.pathname.split('/').filter(Boolean)[1];
         let envData = null;
-        let openFiles = new Map(); // path -> { content, editor, modified }
-        let activeFilePath = null;
+
+        // Unified tab system: key -> { type:'file'|'notebook', ...data }
+        const openTabs = new Map();
+        let activeTabKey = null;
 
         const titleInput = document.getElementById('env-title');
         const badgesEl = document.getElementById('env-badges');
         const containerBadge = document.getElementById('container-badge');
         const fileTree = document.getElementById('file-tree');
         const fileTreeEmpty = document.getElementById('file-tree-empty');
-        const editorTabs = document.getElementById('editor-tabs');
-        const editorArea = document.getElementById('file-editor-area');
+        const tabsBar = document.getElementById('editor-tabs');
+        const editorArea = document.getElementById('editor-area');
         const editorPlaceholder = document.getElementById('editor-placeholder');
         const statusPath = document.getElementById('status-path');
         const statusSave = document.getElementById('status-save');
@@ -169,7 +171,9 @@
         const repoList = document.getElementById('repo-list');
         const repoListEmpty = document.getElementById('repo-list-empty');
 
-        // --- Load environment ---
+        // =====================================================================
+        //  LOAD ENVIRONMENT
+        // =====================================================================
         async function loadEnvironment() {
             const data = await api.get(`/api/environments/${envId}`);
             if (!data) return;
@@ -180,9 +184,7 @@
                 <span class="card-badge python">Python ${data.python_version || '3.11'}</span>
                 ${data.gpu ? '<span class="card-badge gpu">GPU</span>' : ''}
             `;
-            if (data.container_state) {
-                updateContainerBadge(data.container_state.status);
-            }
+            if (data.container_state) updateContainerBadge(data.container_state.status);
             renderNotebooks(data.notebooks || []);
             if (data.container_state && data.container_state.status === 'ready') {
                 loadFileTree();
@@ -194,15 +196,15 @@
             containerBadge.className = `container-badge ${status}`;
             const text = containerBadge.querySelector('.badge-text');
             const labels = {
-                none: 'No container', building: message || 'Building...',
-                starting: 'Starting...', ready: 'Running',
-                stopping: 'Stopping...', stopped: 'Stopped',
-                error: message || 'Error',
+                none:'No container', building:message||'Building...', starting:'Starting...',
+                ready:'Running', stopping:'Stopping...', stopped:'Stopped', error:message||'Error',
             };
             text.textContent = labels[status] || status;
         }
 
-        // --- Notebooks ---
+        // =====================================================================
+        //  SIDEBAR: NOTEBOOKS
+        // =====================================================================
         function renderNotebooks(notebooks) {
             notebookList.innerHTML = '';
             if (notebooks.length === 0) {
@@ -212,8 +214,9 @@
             notebooks
                 .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
                 .forEach(nb => {
+                    const key = 'nb:' + nb.id;
                     const el = document.createElement('div');
-                    el.className = 'file-entry';
+                    el.className = 'file-entry' + (activeTabKey === key ? ' active' : '');
                     el.innerHTML = `
                         <span class="file-icon">&#128211;</span>
                         <span class="file-name">${escapeHtml(nb.name)}</span>
@@ -227,7 +230,7 @@
                             deleteNotebook(nb.id, nb.name);
                             return;
                         }
-                        window.location.href = `/environment/${envId}/notebook/${nb.id}`;
+                        openNotebookTab(nb.id, nb.name);
                     });
                     notebookList.appendChild(el);
                 });
@@ -235,11 +238,15 @@
 
         async function deleteNotebook(id, name) {
             if (!confirm(`Delete "${name}"?`)) return;
+            const key = 'nb:' + id;
+            if (openTabs.has(key)) closeTab(key);
             await api.del(`/api/notebooks/${id}`);
             loadEnvironment();
         }
 
-        // --- File tree ---
+        // =====================================================================
+        //  SIDEBAR: FILE TREE
+        // =====================================================================
         async function loadFileTree() {
             const data = await api.get(`/api/environments/${envId}/files`);
             if (!data || !data.entries) {
@@ -252,32 +259,24 @@
         }
 
         function renderFileTree(entries) {
-            // Remove old entries but keep the empty message element
             fileTree.querySelectorAll('.file-entry').forEach(el => el.remove());
-
             if (entries.length === 0) {
                 fileTreeEmpty.style.display = 'block';
                 fileTreeEmpty.textContent = 'No files yet. Create one to get started.';
                 return;
             }
             fileTreeEmpty.style.display = 'none';
-
-            // Sort: dirs first, then files, alphabetical
-            const dirs = entries.filter(e => e.type === 'directory').sort((a, b) => a.path.localeCompare(b.path));
-            const files = entries.filter(e => e.type === 'file').sort((a, b) => a.path.localeCompare(b.path));
-
+            const dirs = entries.filter(e => e.type==='directory').sort((a,b) => a.path.localeCompare(b.path));
+            const files = entries.filter(e => e.type==='file').sort((a,b) => a.path.localeCompare(b.path));
             for (const entry of [...dirs, ...files]) {
                 const el = document.createElement('div');
-                el.className = `file-entry ${entry.type === 'directory' ? 'directory' : ''}`;
-                if (entry.path === activeFilePath) el.classList.add('active');
-
+                el.className = `file-entry ${entry.type==='directory'?'directory':''}`;
+                if (entry.path === activeTabKey) el.classList.add('active');
                 const depth = entry.path.split('/').length - 1;
-                const indent = depth * 12;
-                const icon = entry.type === 'directory' ? '&#128193;' : '&#128196;';
+                const icon = entry.type==='directory' ? '&#128193;' : '&#128196;';
                 const sizeStr = entry.size != null ? formatSize(entry.size) : '';
-
                 el.innerHTML = `
-                    <span class="file-icon" style="margin-left:${indent}px">${icon}</span>
+                    <span class="file-icon" style="margin-left:${depth*12}px">${icon}</span>
                     <span class="file-name">${escapeHtml(entry.name)}</span>
                     <span class="file-size">${sizeStr}</span>
                     <div class="file-entry-actions">
@@ -286,474 +285,617 @@
                     </div>
                 `;
                 el.addEventListener('click', (e) => {
-                    if (e.target.closest('.rename-btn')) {
-                        e.stopPropagation();
-                        renameFileEntry(entry);
-                        return;
-                    }
-                    if (e.target.closest('.delete-btn')) {
-                        e.stopPropagation();
-                        deleteFileEntry(entry);
-                        return;
-                    }
-                    if (entry.type === 'file') {
-                        openFile(entry.path);
-                    }
+                    if (e.target.closest('.rename-btn')) { e.stopPropagation(); renameFileEntry(entry); return; }
+                    if (e.target.closest('.delete-btn')) { e.stopPropagation(); deleteFileEntry(entry); return; }
+                    if (entry.type==='file') openFileTab(entry.path);
                 });
                 fileTree.appendChild(el);
             }
         }
 
-        function formatSize(bytes) {
-            if (bytes < 1024) return `${bytes}B`;
-            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
-            return `${(bytes / 1024 / 1024).toFixed(1)}M`;
-        }
+        function formatSize(b) { if(b<1024) return b+'B'; if(b<1048576) return (b/1024).toFixed(1)+'K'; return (b/1048576).toFixed(1)+'M'; }
 
         async function renameFileEntry(entry) {
             const newName = prompt('Rename to:', entry.name);
             if (!newName || newName === entry.name) return;
-            const parts = entry.path.split('/');
-            parts[parts.length - 1] = newName;
+            const parts = entry.path.split('/'); parts[parts.length-1] = newName;
             const newPath = parts.join('/');
-            await api.post(`/api/environments/${envId}/files/rename`, {
-                old_path: entry.path, new_path: newPath,
-            });
-            // Update open file tab if renamed
-            if (openFiles.has(entry.path)) {
-                const fileData = openFiles.get(entry.path);
-                openFiles.delete(entry.path);
-                openFiles.set(newPath, fileData);
-                if (activeFilePath === entry.path) activeFilePath = newPath;
+            await api.post(`/api/environments/${envId}/files/rename`, { old_path:entry.path, new_path:newPath });
+            if (openTabs.has(entry.path)) {
+                const td = openTabs.get(entry.path); openTabs.delete(entry.path); openTabs.set(newPath, td);
+                if (activeTabKey === entry.path) activeTabKey = newPath;
             }
-            loadFileTree();
-            renderTabs();
+            loadFileTree(); renderTabsBar();
         }
 
         async function deleteFileEntry(entry) {
             if (!confirm(`Delete "${entry.name}"?`)) return;
             await api.del(`/api/environments/${envId}/files?path=${encodeURIComponent(entry.path)}`);
-            // Close tab if open
-            if (openFiles.has(entry.path)) {
-                closeFile(entry.path);
-            }
+            if (openTabs.has(entry.path)) closeTab(entry.path);
             loadFileTree();
         }
 
-        // --- File editor ---
-        async function openFile(path) {
-            if (!openFiles.has(path)) {
-                const data = await api.get(
-                    `/api/environments/${envId}/files/read?path=${encodeURIComponent(path)}`
-                );
-                if (!data) return;
-                openFiles.set(path, {
-                    content: data.content,
-                    savedContent: data.content,
-                    editor: null,
-                    modified: false,
-                });
+        // =====================================================================
+        //  SIDEBAR: REPOS
+        // =====================================================================
+        async function loadRepos() {
+            const data = await api.get(`/api/environments/${envId}/repos`);
+            if (!data || !data.repos) { repoListEmpty.style.display = 'block'; return; }
+            renderRepos(data.repos);
+        }
+
+        function renderRepos(repos) {
+            repoList.querySelectorAll('.file-entry').forEach(el => el.remove());
+            if (repos.length === 0) { repoListEmpty.style.display = 'block'; return; }
+            repoListEmpty.style.display = 'none';
+            for (const repo of repos) {
+                const el = document.createElement('div');
+                el.className = 'file-entry directory';
+                const badges = repo.installable ? '<span style="font-size:0.65rem;color:var(--accent-green);margin-left:4px;">installable</span>' : '';
+                el.innerHTML = `
+                    <span class="file-icon">&#128230;</span>
+                    <span class="file-name">${escapeHtml(repo.name)}${badges}</span>
+                    <div class="file-entry-actions">
+                        ${repo.installable ? '<button class="install-btn" title="pip install -e">Install</button>' : ''}
+                        <button class="delete-btn" title="Remove">&#10005;</button>
+                    </div>
+                `;
+                if (el.querySelector('.install-btn')) el.querySelector('.install-btn').addEventListener('click', (e) => { e.stopPropagation(); doInstallRepo(repo.name); });
+                el.querySelector('.delete-btn').addEventListener('click', (e) => { e.stopPropagation(); deleteRepo(repo.name); });
+                repoList.appendChild(el);
             }
-            activeFilePath = path;
-            renderTabs();
-            renderEditor();
-            // Update file tree selection
+        }
+
+        async function deleteRepo(name) { if (!confirm(`Remove repo "${name}"?`)) return; await api.del(`/api/environments/${envId}/repos/${encodeURIComponent(name)}`); loadRepos(); }
+
+        // =====================================================================
+        //  TAB SYSTEM
+        // =====================================================================
+        function tabLabel(key) {
+            const tab = openTabs.get(key);
+            if (!tab) return key;
+            if (tab.type === 'notebook') return tab.name;
+            return key.split('/').pop();
+        }
+
+        function renderTabsBar() {
+            tabsBar.innerHTML = '';
+            for (const [key, tab] of openTabs) {
+                const el = document.createElement('div');
+                const modified = tab.type === 'file' && tab.modified;
+                el.className = `editor-tab ${key===activeTabKey?'active':''} ${modified?'modified':''}`;
+                const icon = tab.type === 'notebook' ? '&#128211; ' : '';
+                el.innerHTML = `
+                    <span class="tab-name">${icon}${escapeHtml(tabLabel(key))}</span>
+                    <button class="tab-close" title="Close">&times;</button>
+                `;
+                el.querySelector('.tab-name').addEventListener('click', () => { switchTab(key); });
+                el.querySelector('.tab-close').addEventListener('click', (e) => { e.stopPropagation(); closeTab(key); });
+                tabsBar.appendChild(el);
+            }
+        }
+
+        function switchTab(key) {
+            activeTabKey = key;
+            renderTabsBar();
+            renderActiveTab();
+            updateSidebarSelection();
+        }
+
+        function closeTab(key) {
+            const tab = openTabs.get(key);
+            if (!tab) return;
+            if (tab.type === 'file') {
+                if (tab.modified && !confirm(`"${key}" has unsaved changes. Close?`)) return;
+                if (tab.editor) tab.editor.destroy();
+            }
+            if (tab.type === 'notebook' && tab.ws) {
+                tab.ws.disconnect();
+            }
+            if (tab.container) tab.container.remove();
+            openTabs.delete(key);
+            if (activeTabKey === key) {
+                const remaining = [...openTabs.keys()];
+                activeTabKey = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+            }
+            renderTabsBar();
+            renderActiveTab();
+            updateSidebarSelection();
+        }
+
+        function updateSidebarSelection() {
             fileTree.querySelectorAll('.file-entry').forEach(el => el.classList.remove('active'));
+            notebookList.querySelectorAll('.file-entry').forEach(el => el.classList.remove('active'));
+        }
+
+        function renderActiveTab() {
+            // Hide all tab containers
+            editorArea.querySelectorAll('.tab-content').forEach(el => { el.style.display = 'none'; });
+
+            if (!activeTabKey || !openTabs.has(activeTabKey)) {
+                editorPlaceholder.style.display = 'flex';
+                statusPath.textContent = '';
+                statusSave.textContent = '';
+                return;
+            }
+            editorPlaceholder.style.display = 'none';
+
+            const tab = openTabs.get(activeTabKey);
+            if (tab.type === 'file') renderFileTabContent(activeTabKey, tab);
+            else if (tab.type === 'notebook') renderNotebookTabContent(activeTabKey, tab);
+        }
+
+        // =====================================================================
+        //  FILE TABS
+        // =====================================================================
+        async function openFileTab(path) {
+            if (!openTabs.has(path)) {
+                const data = await api.get(`/api/environments/${envId}/files/read?path=${encodeURIComponent(path)}`);
+                if (!data) return;
+                openTabs.set(path, { type:'file', content:data.content, savedContent:data.content, editor:null, modified:false, container:null });
+            }
+            switchTab(path);
             statusPath.textContent = path;
         }
 
-        function closeFile(path) {
-            const file = openFiles.get(path);
-            if (file && file.modified) {
-                if (!confirm(`"${path}" has unsaved changes. Close anyway?`)) return;
-            }
-            if (file && file.editor) {
-                file.editor.destroy();
-            }
-            openFiles.delete(path);
-            if (activeFilePath === path) {
-                const remaining = [...openFiles.keys()];
-                activeFilePath = remaining.length > 0 ? remaining[remaining.length - 1] : null;
-            }
-            renderTabs();
-            renderEditor();
-        }
-
-        function renderTabs() {
-            editorTabs.innerHTML = '';
-            for (const [path, file] of openFiles) {
-                const tab = document.createElement('div');
-                const name = path.split('/').pop();
-                tab.className = `editor-tab ${path === activeFilePath ? 'active' : ''} ${file.modified ? 'modified' : ''}`;
-                tab.innerHTML = `
-                    <span class="tab-name">${escapeHtml(name)}</span>
-                    <button class="tab-close" title="Close">&times;</button>
-                `;
-                tab.querySelector('.tab-name').addEventListener('click', () => {
-                    activeFilePath = path;
-                    renderTabs();
-                    renderEditor();
-                });
-                tab.querySelector('.tab-close').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    closeFile(path);
-                });
-                editorTabs.appendChild(tab);
-            }
-        }
-
-        let currentEditor = null;
-
-        function renderEditor() {
-            // Hide/destroy current editor
-            if (currentEditor) {
-                currentEditor.dom.style.display = 'none';
-            }
-
-            if (!activeFilePath || !openFiles.has(activeFilePath)) {
-                editorPlaceholder.style.display = 'flex';
-                statusPath.textContent = '';
-                return;
-            }
-
-            editorPlaceholder.style.display = 'none';
-            statusPath.textContent = activeFilePath;
+        function renderFileTabContent(key, tab) {
+            statusPath.textContent = key;
             statusSave.textContent = '';
 
-            const file = openFiles.get(activeFilePath);
-
-            if (file.editor) {
-                file.editor.dom.style.display = 'block';
-                currentEditor = file.editor;
+            if (tab.container) {
+                tab.container.style.display = 'flex';
                 return;
             }
 
-            // Wait for CodeMirror
             if (!window.EditorView) {
-                window.addEventListener('codemirror-ready', () => renderEditor(), { once: true });
+                window.addEventListener('codemirror-ready', () => renderFileTabContent(key, tab), { once: true });
                 return;
             }
 
-            const path = activeFilePath;
-            const isPython = path.endsWith('.py');
+            const isPython = key.endsWith('.py');
+            const wrap = document.createElement('div');
+            wrap.className = 'tab-content';
+            wrap.style.display = 'flex';
+            wrap.style.flex = '1';
+            wrap.style.minHeight = '0';
 
             const extensions = [
-                lineNumbers(),
-                highlightActiveLine(),
-                highlightActiveLineGutter(),
+                lineNumbers(), highlightActiveLine(), highlightActiveLineGutter(),
                 EditorView.lineWrapping,
-                syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-                oneDark,
+                syntaxHighlighting(defaultHighlightStyle, { fallback:true }), oneDark,
                 keymap.of([
-                    { key: 'Mod-s', run: () => { saveFile(path); return true; } },
+                    { key:'Mod-s', run:() => { saveFile(key); return true; } },
                     ...defaultKeymap,
                 ]),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged) {
-                        const content = update.state.doc.toString();
-                        file.content = content;
-                        file.modified = content !== file.savedContent;
-                        renderTabs();
-                        scheduleSave(path);
+                        tab.content = update.state.doc.toString();
+                        tab.modified = tab.content !== tab.savedContent;
+                        renderTabsBar();
+                        scheduleSave(key);
                     }
                 }),
                 ...(isPython ? [python()] : []),
             ];
 
             const editor = new EditorView({
-                state: EditorState.create({
-                    doc: file.content,
-                    extensions,
-                }),
-                parent: editorArea,
+                state: EditorState.create({ doc: tab.content, extensions }),
+                parent: wrap,
             });
-
-            file.editor = editor;
-            currentEditor = editor;
+            tab.editor = editor;
+            tab.container = wrap;
+            editorArea.appendChild(wrap);
         }
 
         let _saveTimers = {};
-        function scheduleSave(path) {
-            clearTimeout(_saveTimers[path]);
-            _saveTimers[path] = setTimeout(() => saveFile(path), 1000);
-        }
+        function scheduleSave(key) { clearTimeout(_saveTimers[key]); _saveTimers[key] = setTimeout(() => saveFile(key), 1000); }
 
-        async function saveFile(path) {
-            const file = openFiles.get(path);
-            if (!file) return;
+        async function saveFile(key) {
+            const tab = openTabs.get(key);
+            if (!tab || tab.type !== 'file') return;
             statusSave.textContent = 'Saving...';
-            const result = await api.put(`/api/environments/${envId}/files/write`, {
-                path, content: file.content,
-            });
+            const result = await api.put(`/api/environments/${envId}/files/write`, { path:key, content:tab.content });
             if (result) {
-                file.savedContent = file.content;
-                file.modified = false;
-                statusSave.textContent = 'Saved';
-                renderTabs();
-                setTimeout(() => {
-                    if (statusSave.textContent === 'Saved') statusSave.textContent = '';
-                }, 2000);
-            } else {
-                statusSave.textContent = 'Save failed';
-            }
+                tab.savedContent = tab.content; tab.modified = false;
+                statusSave.textContent = 'Saved'; renderTabsBar();
+                setTimeout(() => { if (statusSave.textContent === 'Saved') statusSave.textContent = ''; }, 2000);
+            } else { statusSave.textContent = 'Save failed'; }
         }
 
-        // --- Repos ---
-        async function loadRepos() {
-            const data = await api.get(`/api/environments/${envId}/repos`);
-            if (!data || !data.repos) {
-                repoListEmpty.style.display = 'block';
-                return;
-            }
-            renderRepos(data.repos);
-        }
-
-        function renderRepos(repos) {
-            repoList.querySelectorAll('.file-entry').forEach(el => el.remove());
-            if (repos.length === 0) {
-                repoListEmpty.style.display = 'block';
-                return;
-            }
-            repoListEmpty.style.display = 'none';
-
-            for (const repo of repos) {
-                const el = document.createElement('div');
-                el.className = 'file-entry directory';
-                const badges = repo.installable
-                    ? '<span style="font-size:0.65rem;color:var(--accent-green);margin-left:4px;">installable</span>'
-                    : '';
-                el.innerHTML = `
-                    <span class="file-icon">&#128230;</span>
-                    <span class="file-name">${escapeHtml(repo.name)}${badges}</span>
-                    <div class="file-entry-actions">
-                        ${repo.installable ? '<button class="install-btn" title="pip install -e">Install</button>' : ''}
-                        <button class="delete-btn" title="Remove repo">&#10005;</button>
-                    </div>
-                `;
-                const installBtn = el.querySelector('.install-btn');
-                if (installBtn) {
-                    installBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        doInstallRepo(repo.name);
-                    });
-                }
-                el.querySelector('.delete-btn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    deleteRepo(repo.name);
+        // =====================================================================
+        //  NOTEBOOK TABS
+        // =====================================================================
+        async function openNotebookTab(nbId, name) {
+            const key = 'nb:' + nbId;
+            if (!openTabs.has(key)) {
+                const data = await api.get(`/api/notebooks/${nbId}`);
+                if (!data) return;
+                openTabs.set(key, {
+                    type: 'notebook', id: nbId, name: data.name,
+                    data: data, container: null, ws: null,
+                    cells: new Map(), cellOrder: [], execCounts: {},
                 });
-                repoList.appendChild(el);
+            }
+            switchTab(key);
+            statusPath.textContent = name || '';
+        }
+
+        function renderNotebookTabContent(key, tab) {
+            statusPath.textContent = tab.name;
+            statusSave.textContent = '';
+
+            if (tab.container) {
+                tab.container.style.display = 'flex';
+                return;
+            }
+
+            const wrap = document.createElement('div');
+            wrap.className = 'tab-content notebook-embed';
+            wrap.style.display = 'flex';
+            wrap.style.flexDirection = 'column';
+            wrap.style.flex = '1';
+            wrap.style.minHeight = '0';
+
+            // Toolbar
+            const toolbar = document.createElement('div');
+            toolbar.className = 'nb-toolbar';
+            toolbar.innerHTML = `
+                <button class="btn btn-small nb-add-code">+ Code</button>
+                <button class="btn btn-small nb-run-all">Run All</button>
+                <button class="btn btn-small btn-stop nb-interrupt" style="display:none;">Stop</button>
+                <div class="toolbar-spacer"></div>
+                <span class="nb-save-status" style="font-size:0.8rem;color:var(--text-muted);"></span>
+            `;
+            wrap.appendChild(toolbar);
+
+            // Cells container
+            const cellsDiv = document.createElement('div');
+            cellsDiv.className = 'cells-container';
+            cellsDiv.style.flex = '1';
+            cellsDiv.style.overflowY = 'auto';
+            cellsDiv.style.padding = '0';
+            wrap.appendChild(cellsDiv);
+
+            tab.container = wrap;
+            tab.cellsDiv = cellsDiv;
+            tab.toolbar = toolbar;
+            editorArea.appendChild(wrap);
+
+            // Render existing cells
+            for (const cellData of (tab.data.cells || [])) {
+                addCellToTab(tab, cellData);
+            }
+
+            // Connect WebSocket
+            connectNotebookWs(tab);
+
+            // Toolbar handlers
+            toolbar.querySelector('.nb-add-code').addEventListener('click', () => addNewCell(tab));
+            toolbar.querySelector('.nb-run-all').addEventListener('click', () => runAllCells(tab));
+            toolbar.querySelector('.nb-interrupt').addEventListener('click', () => { if (tab.ws) tab.ws.interrupt(tab._runningCellId || ''); });
+        }
+
+        function addCellToTab(tab, cellData) {
+            if (!window.EditorView) {
+                window.addEventListener('codemirror-ready', () => addCellToTab(tab, cellData), { once: true });
+                return;
+            }
+
+            const cellId = cellData.id;
+            const el = document.createElement('div');
+            el.className = 'cell';
+            el.dataset.cellId = cellId;
+
+            // Header
+            const header = document.createElement('div');
+            header.className = 'cell-header';
+            header.innerHTML = `
+                <span class="cell-exec-count">In [ ]:</span>
+                <span class="cell-type-badge">code</span>
+                <div class="cell-toolbar">
+                    <button class="btn-icon run-btn" title="Run (Shift+Enter)">&#9654;</button>
+                    <button class="btn-icon del-btn" title="Delete">&#10005;</button>
+                </div>
+            `;
+            el.appendChild(header);
+
+            // Editor
+            const editorWrap = document.createElement('div');
+            editorWrap.className = 'cell-editor';
+            el.appendChild(editorWrap);
+
+            // Output
+            const outputWrap = document.createElement('div');
+            outputWrap.className = 'cell-output-wrapper';
+            outputWrap.style.display = 'none';
+            const outputEl = document.createElement('div');
+            outputEl.className = 'cell-output';
+            outputWrap.appendChild(outputEl);
+            el.appendChild(outputWrap);
+
+            tab.cellsDiv.appendChild(el);
+
+            // CodeMirror for cell
+            const extensions = [
+                lineNumbers(), highlightActiveLine(), highlightActiveLineGutter(),
+                EditorView.lineWrapping,
+                syntaxHighlighting(defaultHighlightStyle, { fallback:true }), oneDark,
+                keymap.of([
+                    { key:'Shift-Enter', run:() => { executeCell(tab, cellId); return true; } },
+                    { key:'Ctrl-Enter', run:() => { executeCell(tab, cellId); return true; } },
+                    ...defaultKeymap,
+                ]),
+                EditorView.updateListener.of((update) => {
+                    if (update.docChanged) scheduleCellSave(tab, cellId, update.state.doc.toString());
+                }),
+                python(),
+            ];
+
+            const editor = new EditorView({
+                state: EditorState.create({ doc: cellData.source || '', extensions }),
+                parent: editorWrap,
+            });
+
+            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, execCountEl: header.querySelector('.cell-exec-count') };
+            tab.cells.set(cellId, cellInfo);
+            tab.cellOrder.push(cellId);
+
+            // Render existing outputs
+            if (cellData.outputs && cellData.outputs.length > 0) {
+                for (const out of cellData.outputs) appendCellOutput(cellInfo, out.output_type, out.content);
+            }
+            if (cellData.execution_count != null) {
+                cellInfo.execCountEl.textContent = `In [${cellData.execution_count}]:`;
+            }
+
+            // Button handlers
+            header.querySelector('.run-btn').addEventListener('click', () => executeCell(tab, cellId));
+            header.querySelector('.del-btn').addEventListener('click', () => deleteCellFromTab(tab, cellId));
+        }
+
+        async function addNewCell(tab) {
+            const result = await api.post(`/api/notebooks/${tab.id}/cells`, { cell_type:'code', source:'' });
+            if (!result || !result.cells) return;
+            const newCellData = result.cells[result.cells.length - 1];
+            addCellToTab(tab, newCellData);
+        }
+
+        async function deleteCellFromTab(tab, cellId) {
+            const cell = tab.cells.get(cellId);
+            if (!cell) return;
+            await api.del(`/api/notebooks/${tab.id}/cells/${cellId}`);
+            cell.editor.destroy();
+            cell.el.remove();
+            tab.cells.delete(cellId);
+            tab.cellOrder = tab.cellOrder.filter(id => id !== cellId);
+        }
+
+        let _cellSaveTimers = {};
+        function scheduleCellSave(tab, cellId, source) {
+            const k = tab.id + ':' + cellId;
+            clearTimeout(_cellSaveTimers[k]);
+            _cellSaveTimers[k] = setTimeout(() => {
+                api.put(`/api/notebooks/${tab.id}/cells/${cellId}`, { source });
+            }, 800);
+        }
+
+        // =====================================================================
+        //  NOTEBOOK EXECUTION (WebSocket)
+        // =====================================================================
+        function connectNotebookWs(tab) {
+            const ws = new NotebookWebSocket(tab.id);
+
+            ws.on('container_state', (msg) => {
+                updateContainerBadge(msg.status, msg.message);
+            });
+
+            ws.on('state', (msg) => {
+                const cell = tab.cells.get(msg.cell_id);
+                if (!cell) return;
+                if (msg.execution_state === 'running') {
+                    cell.execCountEl.textContent = 'In [*]:';
+                    cell.execCountEl.className = 'cell-exec-count running';
+                    cell.el.className = 'cell running';
+                    tab._runningCellId = msg.cell_id;
+                    tab.toolbar.querySelector('.nb-interrupt').style.display = 'inline-flex';
+                } else {
+                    if (msg.execution_count != null) cell.execCountEl.textContent = `In [${msg.execution_count}]:`;
+                    cell.execCountEl.className = 'cell-exec-count';
+                    cell.el.className = msg.execution_state === 'errored' ? 'cell errored' : 'cell completed';
+                    if (tab._runningCellId === msg.cell_id) {
+                        tab._runningCellId = null;
+                        tab.toolbar.querySelector('.nb-interrupt').style.display = 'none';
+                    }
+                }
+            });
+
+            ws.on('output', (msg) => {
+                const cell = tab.cells.get(msg.cell_id);
+                if (cell) appendCellOutput(cell, msg.stream, msg.text);
+            });
+
+            ws.on('result', (msg) => {
+                const cell = tab.cells.get(msg.cell_id);
+                if (cell) appendCellOutput(cell, 'result', msg.data);
+            });
+
+            ws.on('error', (msg) => {
+                const cell = tab.cells.get(msg.cell_id);
+                if (cell) {
+                    const div = document.createElement('div');
+                    div.className = 'output-error';
+                    div.innerHTML = `<span class="error-name">${escapeHtml(msg.ename)}: ${escapeHtml(msg.evalue)}</span>`;
+                    if (msg.traceback && msg.traceback.length) {
+                        const pre = document.createElement('pre');
+                        pre.className = 'traceback';
+                        pre.textContent = msg.traceback.join('\n');
+                        div.appendChild(pre);
+                    }
+                    cell.outputEl.appendChild(div);
+                    cell.outputWrap.style.display = 'block';
+                }
+            });
+
+            tab.ws = ws;
+            ws.connect();
+        }
+
+        function appendCellOutput(cell, type, content) {
+            if (!content) return;
+            const last = cell.outputEl.lastElementChild;
+            if (last && last.tagName === 'PRE' && last.className === `output-${type}`) {
+                last.textContent += content;
+            } else {
+                const pre = document.createElement('pre');
+                pre.className = `output-${type}`;
+                pre.textContent = content;
+                cell.outputEl.appendChild(pre);
+            }
+            cell.outputWrap.style.display = 'block';
+        }
+
+        function executeCell(tab, cellId) {
+            if (!tab.ws) return;
+            const cell = tab.cells.get(cellId);
+            if (!cell) return;
+            cell.outputEl.innerHTML = '';
+            cell.outputWrap.style.display = 'none';
+            const source = cell.editor.state.doc.toString();
+            tab.ws.execute(cellId, source);
+        }
+
+        async function runAllCells(tab) {
+            for (const cellId of tab.cellOrder) {
+                const cell = tab.cells.get(cellId);
+                if (!cell) continue;
+                cell.outputEl.innerHTML = '';
+                cell.outputWrap.style.display = 'none';
+                const source = cell.editor.state.doc.toString();
+                tab.ws.execute(cellId, source);
+                // Wait for completion
+                await new Promise(resolve => {
+                    const handler = (msg) => {
+                        if (msg.cell_id === cellId && (msg.execution_state === 'completed' || msg.execution_state === 'errored')) {
+                            tab.ws.off('state', handler);
+                            resolve();
+                        }
+                    };
+                    tab.ws.on('state', handler);
+                });
             }
         }
 
-        async function deleteRepo(name) {
-            if (!confirm(`Remove repo "${name}"?`)) return;
-            await api.del(`/api/environments/${envId}/repos/${encodeURIComponent(name)}`);
-            loadRepos();
-        }
-
+        // =====================================================================
+        //  CLONE / INSTALL DIALOGS (unchanged logic)
+        // =====================================================================
         async function doInstallRepo(name) {
-            const installStatus = document.getElementById('install-status');
-            installStatus.style.display = 'block';
-            installStatus.style.color = 'var(--accent-yellow)';
-            installStatus.textContent = `Installing ${name}...`;
+            const is = document.getElementById('install-status');
+            is.style.display = 'block'; is.style.color = 'var(--accent-yellow)'; is.textContent = `Installing ${name}...`;
             document.getElementById('install-dialog').style.display = 'flex';
-            document.getElementById('install-message').textContent = `Installing "${name}" as an editable package...`;
+            document.getElementById('install-message').textContent = `Installing "${name}"...`;
             document.getElementById('install-markers').textContent = '';
             document.getElementById('install-run').style.display = 'none';
             document.getElementById('install-skip').textContent = 'Close';
-
-            const result = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: name });
-            if (result) {
-                installStatus.style.color = 'var(--accent-green)';
-                installStatus.textContent = 'Installed successfully.';
-            } else {
-                installStatus.style.color = 'var(--accent-red)';
-                installStatus.textContent = 'Installation failed.';
-            }
+            const r = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: name });
+            is.style.color = r ? 'var(--accent-green)' : 'var(--accent-red)';
+            is.textContent = r ? 'Installed successfully.' : 'Installation failed.';
         }
 
-        // Clone dialog
         const cloneDialog = document.getElementById('clone-dialog');
-        const cloneUrl = document.getElementById('clone-url');
-        const cloneBranch = document.getElementById('clone-branch');
-        const cloneStatus = document.getElementById('clone-status');
-        const cloneSubmit = document.getElementById('clone-submit');
-
         document.getElementById('btn-clone-repo').addEventListener('click', () => {
-            cloneUrl.value = '';
-            cloneBranch.value = '';
-            cloneStatus.style.display = 'none';
-            cloneSubmit.disabled = false;
-            cloneSubmit.textContent = 'Clone';
+            document.getElementById('clone-url').value = '';
+            document.getElementById('clone-branch').value = '';
+            document.getElementById('clone-status').style.display = 'none';
+            document.getElementById('clone-submit').disabled = false;
+            document.getElementById('clone-submit').textContent = 'Clone';
             cloneDialog.style.display = 'flex';
-            cloneUrl.focus();
+            document.getElementById('clone-url').focus();
         });
-
-        document.getElementById('clone-cancel').addEventListener('click', () => {
-            cloneDialog.style.display = 'none';
-        });
-
-        cloneDialog.addEventListener('click', (e) => {
-            if (e.target === cloneDialog) cloneDialog.style.display = 'none';
-        });
-
-        cloneSubmit.addEventListener('click', async () => {
-            const url = cloneUrl.value.trim();
+        document.getElementById('clone-cancel').addEventListener('click', () => { cloneDialog.style.display = 'none'; });
+        cloneDialog.addEventListener('click', (e) => { if (e.target === cloneDialog) cloneDialog.style.display = 'none'; });
+        document.getElementById('clone-submit').addEventListener('click', async () => {
+            const url = document.getElementById('clone-url').value.trim();
             if (!url) return;
-            cloneSubmit.disabled = true;
-            cloneSubmit.textContent = 'Cloning...';
-            cloneStatus.style.display = 'block';
-            cloneStatus.style.color = 'var(--accent-yellow)';
-            cloneStatus.textContent = 'Cloning repository...';
-
+            const btn = document.getElementById('clone-submit');
+            const st = document.getElementById('clone-status');
+            btn.disabled = true; btn.textContent = 'Cloning...';
+            st.style.display = 'block'; st.style.color = 'var(--accent-yellow)'; st.textContent = 'Cloning...';
             const body = { url };
-            const branch = cloneBranch.value.trim();
+            const branch = document.getElementById('clone-branch').value.trim();
             if (branch) body.branch = branch;
-
             const result = await api.post(`/api/environments/${envId}/repos/clone`, body);
             if (!result) {
-                cloneStatus.style.color = 'var(--accent-red)';
-                cloneStatus.textContent = 'Clone failed. Check the URL and try again.';
-                cloneSubmit.disabled = false;
-                cloneSubmit.textContent = 'Clone';
-                return;
+                st.style.color = 'var(--accent-red)'; st.textContent = 'Clone failed.';
+                btn.disabled = false; btn.textContent = 'Clone'; return;
             }
-
-            cloneStatus.style.color = 'var(--accent-green)';
-            cloneStatus.textContent = `Cloned "${result.name}" successfully.`;
-            cloneDialog.style.display = 'none';
-            loadRepos();
-
-            // If installable, prompt
-            if (result.project && result.project.installable) {
-                showInstallPrompt(result.name, result.project);
-            }
+            cloneDialog.style.display = 'none'; loadRepos();
+            if (result.project && result.project.installable) showInstallPrompt(result.name, result.project);
         });
-
-        // Install prompt dialog
-        const installDialog = document.getElementById('install-dialog');
 
         function showInstallPrompt(repoName, project) {
             const msg = document.getElementById('install-message');
             const markers = document.getElementById('install-markers');
-            const installStatus = document.getElementById('install-status');
+            const is = document.getElementById('install-status');
             const runBtn = document.getElementById('install-run');
             const skipBtn = document.getElementById('install-skip');
-
-            msg.textContent = `"${repoName}" looks like an installable Python project. Install as an editable package?`;
+            msg.textContent = `"${repoName}" is installable. Install as editable package?`;
             markers.textContent = 'Found: ' + project.markers_found.join(', ');
-            installStatus.style.display = 'none';
-            runBtn.style.display = 'inline-flex';
-            runBtn.disabled = false;
-            runBtn.textContent = 'Install as Editable Package';
-            skipBtn.textContent = 'Skip';
-            installDialog.style.display = 'flex';
-
+            is.style.display = 'none'; runBtn.style.display = 'inline-flex'; runBtn.disabled = false;
+            runBtn.textContent = 'Install as Editable Package'; skipBtn.textContent = 'Skip';
+            document.getElementById('install-dialog').style.display = 'flex';
             runBtn.onclick = async () => {
-                runBtn.disabled = true;
-                runBtn.textContent = 'Installing...';
-                installStatus.style.display = 'block';
-                installStatus.style.color = 'var(--accent-yellow)';
-                installStatus.textContent = 'Running pip install -e ...';
-
-                const result = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: repoName });
-                if (result) {
-                    installStatus.style.color = 'var(--accent-green)';
-                    installStatus.textContent = 'Installed successfully. Package is now importable.';
-                    runBtn.style.display = 'none';
-                    skipBtn.textContent = 'Done';
-                } else {
-                    installStatus.style.color = 'var(--accent-red)';
-                    installStatus.textContent = 'Installation failed.';
-                    runBtn.disabled = false;
-                    runBtn.textContent = 'Retry';
-                }
+                runBtn.disabled = true; runBtn.textContent = 'Installing...';
+                is.style.display = 'block'; is.style.color = 'var(--accent-yellow)'; is.textContent = 'Running pip install -e ...';
+                const r = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: repoName });
+                if (r) { is.style.color = 'var(--accent-green)'; is.textContent = 'Installed.'; runBtn.style.display = 'none'; skipBtn.textContent = 'Done'; }
+                else { is.style.color = 'var(--accent-red)'; is.textContent = 'Failed.'; runBtn.disabled = false; runBtn.textContent = 'Retry'; }
             };
         }
+        document.getElementById('install-skip').addEventListener('click', () => { document.getElementById('install-dialog').style.display = 'none'; });
+        document.getElementById('install-dialog').addEventListener('click', (e) => { if (e.target.id === 'install-dialog') e.target.style.display = 'none'; });
 
-        document.getElementById('install-skip').addEventListener('click', () => {
-            installDialog.style.display = 'none';
-        });
-
-        installDialog.addEventListener('click', (e) => {
-            if (e.target === installDialog) installDialog.style.display = 'none';
-        });
-
-        // --- Toolbar actions ---
+        // =====================================================================
+        //  TOOLBAR: FILES / ENV / NOTEBOOK DIALOG
+        // =====================================================================
         document.getElementById('btn-new-file').addEventListener('click', async () => {
             const name = prompt('File name (e.g. utils.py):');
             if (!name) return;
-            await api.put(`/api/environments/${envId}/files/write`, {
-                path: name, content: '',
-            });
-            await loadFileTree();
-            openFile(name);
+            await api.put(`/api/environments/${envId}/files/write`, { path:name, content:'' });
+            await loadFileTree(); openFileTab(name);
         });
-
         document.getElementById('btn-new-dir').addEventListener('click', async () => {
-            const name = prompt('Directory name:');
-            if (!name) return;
-            await api.post(`/api/environments/${envId}/files/mkdir`, { path: name });
-            loadFileTree();
+            const name = prompt('Directory name:'); if (!name) return;
+            await api.post(`/api/environments/${envId}/files/mkdir`, { path:name }); loadFileTree();
         });
+        document.getElementById('btn-refresh-files').addEventListener('click', () => { loadFileTree(); loadRepos(); });
 
-        document.getElementById('btn-refresh-files').addEventListener('click', () => {
-            loadFileTree();
-            loadRepos();
-        });
-
-        // --- Rename environment ---
         titleInput.addEventListener('change', async () => {
-            const newName = titleInput.value.trim();
-            if (!newName || !envData || newName === envData.name) return;
-            const data = await api.put(`/api/environments/${envId}`, { name: newName });
-            if (data) {
-                envData.name = newName;
-                document.title = `${newName} - Jupyter Redux`;
-            } else {
-                titleInput.value = envData.name;
-            }
+            const n = titleInput.value.trim();
+            if (!n || !envData || n === envData.name) return;
+            const d = await api.put(`/api/environments/${envId}`, { name:n });
+            if (d) { envData.name = n; document.title = `${n} - Jupyter Redux`; } else titleInput.value = envData.name;
         });
-        titleInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); titleInput.blur(); }
-        });
+        titleInput.addEventListener('keydown', (e) => { if (e.key==='Enter') { e.preventDefault(); titleInput.blur(); } });
 
-        // --- New notebook dialog ---
-        const dialog = document.getElementById('new-notebook-dialog');
-        const dialogName = document.getElementById('dialog-name');
-        const dialogCreate = document.getElementById('dialog-create');
-        const dialogCancel = document.getElementById('dialog-cancel');
-
+        const nbDialog = document.getElementById('new-notebook-dialog');
+        const nbDialogName = document.getElementById('dialog-name');
         document.getElementById('new-notebook-btn').addEventListener('click', () => {
-            dialogName.value = 'Untitled Notebook';
-            dialog.style.display = 'flex';
-            dialogName.select();
+            nbDialogName.value = 'Untitled Notebook'; nbDialog.style.display = 'flex'; nbDialogName.select();
         });
-
-        dialogCancel.addEventListener('click', () => { dialog.style.display = 'none'; });
-        dialog.addEventListener('click', (e) => {
-            if (e.target === dialog) dialog.style.display = 'none';
-        });
-
-        dialogCreate.addEventListener('click', async () => {
-            dialogCreate.disabled = true;
-            dialogCreate.textContent = 'Creating...';
-            const data = await api.post(`/api/environments/${envId}/notebooks`, {
-                name: dialogName.value || 'Untitled Notebook',
-            });
-            dialogCreate.disabled = false;
-            dialogCreate.textContent = 'Create';
-            dialog.style.display = 'none';
+        document.getElementById('dialog-cancel').addEventListener('click', () => { nbDialog.style.display = 'none'; });
+        nbDialog.addEventListener('click', (e) => { if (e.target === nbDialog) nbDialog.style.display = 'none'; });
+        document.getElementById('dialog-create').addEventListener('click', async () => {
+            const btn = document.getElementById('dialog-create');
+            btn.disabled = true; btn.textContent = 'Creating...';
+            const data = await api.post(`/api/environments/${envId}/notebooks`, { name: nbDialogName.value || 'Untitled Notebook' });
+            btn.disabled = false; btn.textContent = 'Create'; nbDialog.style.display = 'none';
             if (data && data.id) {
-                window.location.href = `/environment/${envId}/notebook/${data.id}`;
+                loadEnvironment();
+                openNotebookTab(data.id, data.name);
             }
         });
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
+        function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
         loadEnvironment();
     })();
