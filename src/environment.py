@@ -38,8 +38,11 @@ class EnvironmentService:
     def _load_env_index(self) -> EnvironmentIndex:
         path = self._env_index_path()
         if path.exists():
-            data = json.loads(path.read_text())
-            return EnvironmentIndex(**data)
+            try:
+                data = json.loads(path.read_text())
+                return EnvironmentIndex(**data)
+            except Exception:
+                path.unlink(missing_ok=True)
         return EnvironmentIndex()
 
     def _save_env_index(self, index: EnvironmentIndex) -> None:
@@ -116,8 +119,12 @@ class EnvironmentService:
     def _load_nb_index(self) -> NotebookIndex:
         path = self._nb_index_path()
         if path.exists():
-            data = json.loads(path.read_text())
-            return NotebookIndex(**data)
+            try:
+                data = json.loads(path.read_text())
+                return NotebookIndex(**data)
+            except Exception:
+                # Stale index from pre-environment schema; reset it
+                path.unlink(missing_ok=True)
         return NotebookIndex()
 
     def _save_nb_index(self, index: NotebookIndex) -> None:
