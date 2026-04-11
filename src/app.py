@@ -8,6 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from src.models import (
     AddCellRequest,
+    CloneRepoRequest,
+    CloneRepoResponse,
     ContainerState,
     ContainerStateResponse,
     CreateEnvironmentRequest,
@@ -17,10 +19,14 @@ from src.models import (
     FileContentResponse,
     FileEntry,
     FileTreeResponse,
+    InstallRepoRequest,
     MkdirRequest,
     NotebookResponse,
+    ProjectDetection,
     RenameFileRequest,
     ReorderCellsRequest,
+    RepoListResponse,
+    RepoSummary,
     UpdateCellRequest,
     UpdateEnvironmentRequest,
     UpdateNotebookRequest,
@@ -315,6 +321,61 @@ async def rename_file(
     csvc = _require_running_env(env_id)
     csvc.rename_file(env_id, req.old_path, req.new_path)
     return {"old_path": req.old_path, "new_path": req.new_path}
+
+
+# --- Repo Operations ---
+
+
+@app.get(
+    "/api/environments/{env_id}/repos",
+    response_model=RepoListResponse,
+)
+async def list_repos(env_id: str) -> RepoListResponse:
+    csvc = _require_running_env(env_id)
+    repos = csvc.list_repos(env_id)
+    return RepoListResponse(
+        repos=[RepoSummary(**r) for r in repos],
+    )
+
+
+@app.post(
+    "/api/environments/{env_id}/repos/clone",
+    response_model=CloneRepoResponse,
+    status_code=201,
+)
+async def clone_repo(
+    env_id: str, req: CloneRepoRequest,
+) -> CloneRepoResponse:
+    csvc = _require_running_env(env_id)
+    result = csvc.clone_repo(
+        env_id, req.url, req.branch, req.name,
+    )
+    return CloneRepoResponse(
+        name=result["name"],
+        path=result["path"],
+        url=result["url"],
+        branch=result["branch"],
+        clone_output=result["clone_output"],
+        project=ProjectDetection(**result["project"]),
+    )
+
+
+@app.post("/api/environments/{env_id}/repos/install")
+async def install_repo(
+    env_id: str, req: InstallRepoRequest,
+) -> dict:
+    csvc = _require_running_env(env_id)
+    output = csvc.install_repo(env_id, req.repo_name)
+    return {"repo_name": req.repo_name, "output": output}
+
+
+@app.delete(
+    "/api/environments/{env_id}/repos/{repo_name}",
+    status_code=204,
+)
+async def delete_repo(env_id: str, repo_name: str) -> None:
+    csvc = _require_running_env(env_id)
+    csvc.delete_repo(env_id, repo_name)
 
 
 # --- Notebook CRUD ---

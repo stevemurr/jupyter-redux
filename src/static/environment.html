@@ -59,6 +59,17 @@
                 </div>
             </div>
 
+            <!-- Repos section -->
+            <div class="sidebar-header">
+                <h3>Repos</h3>
+                <div class="sidebar-actions">
+                    <button id="btn-clone-repo" title="Clone a repository">+ Clone</button>
+                </div>
+            </div>
+            <div class="file-tree" id="repo-list" style="max-height:180px;">
+                <div class="file-tree-empty" id="repo-list-empty">No repos cloned</div>
+            </div>
+
             <!-- Notebooks list in sidebar -->
             <div class="sidebar-header" style="margin-top:auto;">
                 <h3>Notebooks</h3>
@@ -100,6 +111,42 @@
         </div>
     </div>
 
+    <!-- Clone repo dialog -->
+    <div class="dialog-overlay" id="clone-dialog" style="display:none;">
+        <div class="dialog">
+            <h2 class="dialog-title">Clone Repository</h2>
+            <label class="dialog-label">
+                Repository URL
+                <input type="text" id="clone-url" class="dialog-input"
+                       placeholder="https://github.com/user/repo.git">
+            </label>
+            <label class="dialog-label">
+                Branch (optional)
+                <input type="text" id="clone-branch" class="dialog-input"
+                       placeholder="main">
+            </label>
+            <div id="clone-status" style="display:none;font-size:0.85rem;margin-bottom:12px;"></div>
+            <div class="dialog-actions">
+                <button class="btn" id="clone-cancel">Cancel</button>
+                <button class="btn btn-primary" id="clone-submit">Clone</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Install prompt dialog -->
+    <div class="dialog-overlay" id="install-dialog" style="display:none;">
+        <div class="dialog">
+            <h2 class="dialog-title">Project Detected</h2>
+            <p id="install-message" style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:12px;"></p>
+            <div id="install-markers" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--accent-cyan);margin-bottom:16px;"></div>
+            <div id="install-status" style="display:none;font-size:0.85rem;margin-bottom:12px;"></div>
+            <div class="dialog-actions">
+                <button class="btn" id="install-skip">Skip</button>
+                <button class="btn btn-primary" id="install-run">Install as Editable Package</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/js/app.js?v=5"></script>
     <script>
     (function() {
@@ -119,6 +166,8 @@
         const statusPath = document.getElementById('status-path');
         const statusSave = document.getElementById('status-save');
         const notebookList = document.getElementById('notebook-list');
+        const repoList = document.getElementById('repo-list');
+        const repoListEmpty = document.getElementById('repo-list-empty');
 
         // --- Load environment ---
         async function loadEnvironment() {
@@ -137,6 +186,7 @@
             renderNotebooks(data.notebooks || []);
             if (data.container_state && data.container_state.status === 'ready') {
                 loadFileTree();
+                loadRepos();
             }
         }
 
@@ -448,6 +498,187 @@
             }
         }
 
+        // --- Repos ---
+        async function loadRepos() {
+            const data = await api.get(`/api/environments/${envId}/repos`);
+            if (!data || !data.repos) {
+                repoListEmpty.style.display = 'block';
+                return;
+            }
+            renderRepos(data.repos);
+        }
+
+        function renderRepos(repos) {
+            repoList.querySelectorAll('.file-entry').forEach(el => el.remove());
+            if (repos.length === 0) {
+                repoListEmpty.style.display = 'block';
+                return;
+            }
+            repoListEmpty.style.display = 'none';
+
+            for (const repo of repos) {
+                const el = document.createElement('div');
+                el.className = 'file-entry directory';
+                const badges = repo.installable
+                    ? '<span style="font-size:0.65rem;color:var(--accent-green);margin-left:4px;">installable</span>'
+                    : '';
+                el.innerHTML = `
+                    <span class="file-icon">&#128230;</span>
+                    <span class="file-name">${escapeHtml(repo.name)}${badges}</span>
+                    <div class="file-entry-actions">
+                        ${repo.installable ? '<button class="install-btn" title="pip install -e">Install</button>' : ''}
+                        <button class="delete-btn" title="Remove repo">&#10005;</button>
+                    </div>
+                `;
+                const installBtn = el.querySelector('.install-btn');
+                if (installBtn) {
+                    installBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        doInstallRepo(repo.name);
+                    });
+                }
+                el.querySelector('.delete-btn').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteRepo(repo.name);
+                });
+                repoList.appendChild(el);
+            }
+        }
+
+        async function deleteRepo(name) {
+            if (!confirm(`Remove repo "${name}"?`)) return;
+            await api.del(`/api/environments/${envId}/repos/${encodeURIComponent(name)}`);
+            loadRepos();
+        }
+
+        async function doInstallRepo(name) {
+            const installStatus = document.getElementById('install-status');
+            installStatus.style.display = 'block';
+            installStatus.style.color = 'var(--accent-yellow)';
+            installStatus.textContent = `Installing ${name}...`;
+            document.getElementById('install-dialog').style.display = 'flex';
+            document.getElementById('install-message').textContent = `Installing "${name}" as an editable package...`;
+            document.getElementById('install-markers').textContent = '';
+            document.getElementById('install-run').style.display = 'none';
+            document.getElementById('install-skip').textContent = 'Close';
+
+            const result = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: name });
+            if (result) {
+                installStatus.style.color = 'var(--accent-green)';
+                installStatus.textContent = 'Installed successfully.';
+            } else {
+                installStatus.style.color = 'var(--accent-red)';
+                installStatus.textContent = 'Installation failed.';
+            }
+        }
+
+        // Clone dialog
+        const cloneDialog = document.getElementById('clone-dialog');
+        const cloneUrl = document.getElementById('clone-url');
+        const cloneBranch = document.getElementById('clone-branch');
+        const cloneStatus = document.getElementById('clone-status');
+        const cloneSubmit = document.getElementById('clone-submit');
+
+        document.getElementById('btn-clone-repo').addEventListener('click', () => {
+            cloneUrl.value = '';
+            cloneBranch.value = '';
+            cloneStatus.style.display = 'none';
+            cloneSubmit.disabled = false;
+            cloneSubmit.textContent = 'Clone';
+            cloneDialog.style.display = 'flex';
+            cloneUrl.focus();
+        });
+
+        document.getElementById('clone-cancel').addEventListener('click', () => {
+            cloneDialog.style.display = 'none';
+        });
+
+        cloneDialog.addEventListener('click', (e) => {
+            if (e.target === cloneDialog) cloneDialog.style.display = 'none';
+        });
+
+        cloneSubmit.addEventListener('click', async () => {
+            const url = cloneUrl.value.trim();
+            if (!url) return;
+            cloneSubmit.disabled = true;
+            cloneSubmit.textContent = 'Cloning...';
+            cloneStatus.style.display = 'block';
+            cloneStatus.style.color = 'var(--accent-yellow)';
+            cloneStatus.textContent = 'Cloning repository...';
+
+            const body = { url };
+            const branch = cloneBranch.value.trim();
+            if (branch) body.branch = branch;
+
+            const result = await api.post(`/api/environments/${envId}/repos/clone`, body);
+            if (!result) {
+                cloneStatus.style.color = 'var(--accent-red)';
+                cloneStatus.textContent = 'Clone failed. Check the URL and try again.';
+                cloneSubmit.disabled = false;
+                cloneSubmit.textContent = 'Clone';
+                return;
+            }
+
+            cloneStatus.style.color = 'var(--accent-green)';
+            cloneStatus.textContent = `Cloned "${result.name}" successfully.`;
+            cloneDialog.style.display = 'none';
+            loadRepos();
+
+            // If installable, prompt
+            if (result.project && result.project.installable) {
+                showInstallPrompt(result.name, result.project);
+            }
+        });
+
+        // Install prompt dialog
+        const installDialog = document.getElementById('install-dialog');
+
+        function showInstallPrompt(repoName, project) {
+            const msg = document.getElementById('install-message');
+            const markers = document.getElementById('install-markers');
+            const installStatus = document.getElementById('install-status');
+            const runBtn = document.getElementById('install-run');
+            const skipBtn = document.getElementById('install-skip');
+
+            msg.textContent = `"${repoName}" looks like an installable Python project. Install as an editable package?`;
+            markers.textContent = 'Found: ' + project.markers_found.join(', ');
+            installStatus.style.display = 'none';
+            runBtn.style.display = 'inline-flex';
+            runBtn.disabled = false;
+            runBtn.textContent = 'Install as Editable Package';
+            skipBtn.textContent = 'Skip';
+            installDialog.style.display = 'flex';
+
+            runBtn.onclick = async () => {
+                runBtn.disabled = true;
+                runBtn.textContent = 'Installing...';
+                installStatus.style.display = 'block';
+                installStatus.style.color = 'var(--accent-yellow)';
+                installStatus.textContent = 'Running pip install -e ...';
+
+                const result = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: repoName });
+                if (result) {
+                    installStatus.style.color = 'var(--accent-green)';
+                    installStatus.textContent = 'Installed successfully. Package is now importable.';
+                    runBtn.style.display = 'none';
+                    skipBtn.textContent = 'Done';
+                } else {
+                    installStatus.style.color = 'var(--accent-red)';
+                    installStatus.textContent = 'Installation failed.';
+                    runBtn.disabled = false;
+                    runBtn.textContent = 'Retry';
+                }
+            };
+        }
+
+        document.getElementById('install-skip').addEventListener('click', () => {
+            installDialog.style.display = 'none';
+        });
+
+        installDialog.addEventListener('click', (e) => {
+            if (e.target === installDialog) installDialog.style.display = 'none';
+        });
+
         // --- Toolbar actions ---
         document.getElementById('btn-new-file').addEventListener('click', async () => {
             const name = prompt('File name (e.g. utils.py):');
@@ -468,6 +699,7 @@
 
         document.getElementById('btn-refresh-files').addEventListener('click', () => {
             loadFileTree();
+            loadRepos();
         });
 
         // --- Rename environment ---

@@ -110,7 +110,7 @@ class ContainerService:
                     vol_name: {"bind": "/env", "mode": "rw"},
                 },
                 "environment": {
-                    "PYTHONPATH": "/env/lib",
+                    "PYTHONPATH": "/env/lib:/env/files",
                 },
             }
 
@@ -378,6 +378,154 @@ class ContainerService:
         if exit_code != 0:
             raise RuntimeError(
                 f"rename failed: {output.decode(errors='replace')}"
+            )
+
+    # --- Repo operations ---
+
+    REPOS_ROOT = "/env/repos"
+
+    def clone_repo(
+        self,
+        environment_id: str,
+        url: str,
+        branch: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Clone a git repo into /env/repos/{name}.
+
+        Returns dict with clone result and project detection info.
+        """
+        container = self._get_running_container(environment_id)
+
+        # Derive repo name from URL if not provided
+        if not name:
+            name = url.rstrip("/").rsplit("/", 1)[-1]
+            if name.endswith(".git"):
+                name = name[:-4]
+
+        dest = f"{self.REPOS_ROOT}/{name}"
+
+        # Check if already exists
+        exit_code, _ = container.exec_run(["test", "-d", dest])
+        if exit_code == 0:
+            raise FileExistsError(
+                f"Repo '{name}' already exists at {dest}"
+            )
+
+        # Run git clone
+        cmd = ["git", "clone", "--depth", "1"]
+        if branch:
+            cmd.extend(["--branch", branch])
+        cmd.extend([url, dest])
+
+        exit_code, output = container.exec_run(cmd)
+        if exit_code != 0:
+            raise RuntimeError(
+                f"git clone failed: {output.decode(errors='replace')}"
+            )
+
+        # Detect project type
+        detection = self._detect_project(container, dest)
+
+        return {
+            "name": name,
+            "path": dest,
+            "url": url,
+            "branch": branch,
+            "clone_output": output.decode(errors="replace"),
+            "project": detection,
+        }
+
+    def _detect_project(
+        self, container, repo_path: str,
+    ) -> dict:
+        """Scan a cloned repo for Python project files."""
+        markers = [
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+        ]
+        found = []
+        for marker in markers:
+            exit_code, _ = container.exec_run(
+                ["test", "-f", f"{repo_path}/{marker}"],
+            )
+            if exit_code == 0:
+                found.append(marker)
+
+        installable = any(
+            m in found
+            for m in ("pyproject.toml", "setup.py", "setup.cfg")
+        )
+
+        return {
+            "markers_found": found,
+            "installable": installable,
+        }
+
+    def install_repo(
+        self, environment_id: str, repo_name: str,
+    ) -> str:
+        """Run pip install -e on a cloned repo."""
+        container = self._get_running_container(environment_id)
+        dest = f"{self.REPOS_ROOT}/{repo_name}"
+
+        exit_code, _ = container.exec_run(["test", "-d", dest])
+        if exit_code != 0:
+            raise FileNotFoundError(f"Repo '{repo_name}' not found")
+
+        exit_code, output = container.exec_run(
+            ["pip", "install", "-e", dest],
+        )
+        return output.decode(errors="replace")
+
+    def list_repos(self, environment_id: str) -> list[dict]:
+        """List cloned repos under /env/repos/."""
+        container = self._get_running_container(environment_id)
+        script = (
+            "import os, json\n"
+            f"root = '{self.REPOS_ROOT}'\n"
+            "os.makedirs(root, exist_ok=True)\n"
+            "repos = []\n"
+            "for name in sorted(os.listdir(root)):\n"
+            "    path = os.path.join(root, name)\n"
+            "    if os.path.isdir(path):\n"
+            "        markers = []\n"
+            "        for m in ['pyproject.toml','setup.py',"
+            "'setup.cfg','requirements.txt']:\n"
+            "            if os.path.isfile(os.path.join(path, m)):\n"
+            "                markers.append(m)\n"
+            "        installable = any(m in markers for m in "
+            "['pyproject.toml','setup.py','setup.cfg'])\n"
+            "        repos.append({'name': name, 'path': path,"
+            " 'markers': markers, 'installable': installable})\n"
+            "print(json.dumps(repos))\n"
+        )
+        exit_code, output = container.exec_run(
+            ["python", "-c", script],
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"list_repos failed: {output.decode(errors='replace')}"
+            )
+        return json.loads(output.decode())
+
+    def delete_repo(
+        self, environment_id: str, repo_name: str,
+    ) -> None:
+        """Remove a cloned repo."""
+        container = self._get_running_container(environment_id)
+        dest = f"{self.REPOS_ROOT}/{repo_name}"
+        # Safety: only allow deleting under REPOS_ROOT
+        if ".." in repo_name or "/" in repo_name:
+            raise ValueError("Invalid repo name")
+        exit_code, output = container.exec_run(
+            ["rm", "-rf", dest],
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"delete_repo failed: {output.decode(errors='replace')}"
             )
 
     def record_activity(self, environment_id: str) -> None:

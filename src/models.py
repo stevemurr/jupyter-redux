@@ -203,3 +203,41 @@ class MkdirRequest(BaseModel):
 class RenameFileRequest(BaseModel):
     old_path: str
     new_path: str
+
+
+# --- Repo operations ---
+
+
+class ProjectDetection(BaseModel):
+    markers_found: list[str] = Field(default_factory=list)
+    installable: bool = False
+
+
+class CloneRepoRequest(BaseModel):
+    url: str
+    branch: str | None = None
+    name: str | None = None
+
+
+class CloneRepoResponse(BaseModel):
+    name: str
+    path: str
+    url: str
+    branch: str | None = None
+    clone_output: str = ""
+    project: ProjectDetection = Field(default_factory=ProjectDetection)
+
+
+class InstallRepoRequest(BaseModel):
+    repo_name: str
+
+
+class RepoSummary(BaseModel):
+    name: str
+    path: str
+    markers: list[str] = Field(default_factory=list)
+    installable: bool = False
+
+
+class RepoListResponse(BaseModel):
+    repos: list[RepoSummary]

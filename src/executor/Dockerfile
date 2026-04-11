@@ -3,10 +3,14 @@
 ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim AS cpu
 
-ENV PYTHONPATH=/env/lib
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
 
-RUN mkdir -p /env/lib
+RUN mkdir -p /env/lib /env/files /env/repos
 
 COPY src/executor/server.py /opt/executor/server.py
 
@@ -23,7 +27,7 @@ ARG PYTHON_VERSION=3.11
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        software-properties-common gpg-agent && \
+        software-properties-common gpg-agent git && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -33,10 +37,10 @@ RUN apt-get update && \
     python -m ensurepip --upgrade && \
     ln -sf /usr/local/bin/pip${PYTHON_VERSION} /usr/local/bin/pip 2>/dev/null; true
 
-ENV PYTHONPATH=/env/lib
+ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
 
-RUN mkdir -p /env/lib
+RUN mkdir -p /env/lib /env/files /env/repos
 
 COPY src/executor/server.py /opt/executor/server.py
 
