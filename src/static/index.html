@@ -9,24 +9,24 @@
 <body>
     <header class="app-header">
         <h1 class="app-title">Jupyter Redux</h1>
-        <button id="new-notebook-btn" class="btn btn-primary" aria-label="Create new notebook">
-            + New Notebook
+        <button id="new-env-btn" class="btn btn-primary" aria-label="Create new environment">
+            + New Environment
         </button>
     </header>
 
-    <main class="notebook-list-container" role="list" aria-label="Notebooks">
-        <div id="notebook-list" class="notebook-list">
-            <p class="empty-state" id="empty-state">No notebooks yet. Create one to get started.</p>
+    <main class="notebook-list-container" role="list" aria-label="Environments">
+        <div id="env-list" class="notebook-list">
+            <p class="empty-state" id="empty-state">No environments yet. Create one to get started.</p>
         </div>
     </main>
 
-    <!-- New notebook dialog -->
-    <div class="dialog-overlay" id="new-notebook-dialog" style="display:none;">
+    <!-- New environment dialog -->
+    <div class="dialog-overlay" id="new-env-dialog" style="display:none;">
         <div class="dialog">
-            <h2 class="dialog-title">New Notebook</h2>
+            <h2 class="dialog-title">New Environment</h2>
             <label class="dialog-label">
                 Name
-                <input type="text" id="dialog-name" class="dialog-input" value="Untitled Notebook">
+                <input type="text" id="dialog-name" class="dialog-input" value="Untitled Environment">
             </label>
             <label class="dialog-label">
                 Python Version
@@ -48,68 +48,70 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js?v=3"></script>
+    <script src="/static/js/app.js?v=4"></script>
     <script>
-        const listEl = document.getElementById('notebook-list');
-        const emptyState = document.getElementById('empty-state');
-        const newBtn = document.getElementById('new-notebook-btn');
+        const listEl = document.getElementById('env-list');
+        const newBtn = document.getElementById('new-env-btn');
 
-        async function loadNotebooks() {
-            const data = await api.get('/api/notebooks');
+        async function loadEnvironments() {
+            const data = await api.get('/api/environments');
             listEl.innerHTML = '';
-            if (!data || !data.notebooks || data.notebooks.length === 0) {
+            if (!data || !data.environments || data.environments.length === 0) {
                 const msg = document.createElement('p');
                 msg.className = 'empty-state';
-                msg.textContent = 'No notebooks yet. Create one to get started.';
+                msg.textContent = 'No environments yet. Create one to get started.';
                 listEl.appendChild(msg);
                 return;
             }
-            data.notebooks
+            data.environments
                 .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
-                .forEach(nb => {
+                .forEach(env => {
                     const card = document.createElement('div');
                     card.className = 'notebook-card';
                     card.setAttribute('role', 'listitem');
-                    const gpuBadge = nb.gpu ? '<span class="card-badge gpu">GPU</span>' : '';
+                    const gpuBadge = env.gpu ? '<span class="card-badge gpu">GPU</span>' : '';
+                    const nbCount = env.notebook_count || 0;
+                    const nbLabel = nbCount === 1 ? '1 notebook' : `${nbCount} notebooks`;
                     card.innerHTML = `
                         <div class="notebook-card-info">
-                            <span class="notebook-name" data-id="${nb.id}">${escapeHtml(nb.name)}</span>
+                            <span class="notebook-name" data-id="${env.id}">${escapeHtml(env.name)}</span>
                             <div class="notebook-card-badges">
-                                <span class="card-badge python">Python ${nb.python_version || '3.11'}</span>
+                                <span class="card-badge python">Python ${env.python_version || '3.11'}</span>
                                 ${gpuBadge}
-                                <span class="notebook-date">${new Date(nb.updated_at).toLocaleString()}</span>
+                                <span class="card-badge">${nbLabel}</span>
+                                <span class="notebook-date">${new Date(env.updated_at).toLocaleString()}</span>
                             </div>
                         </div>
                         <div class="notebook-card-actions">
-                            <button class="btn btn-small btn-rename" data-id="${nb.id}" aria-label="Rename notebook">Rename</button>
-                            <button class="btn btn-small btn-danger btn-delete" data-id="${nb.id}" aria-label="Delete notebook">Delete</button>
+                            <button class="btn btn-small btn-rename" data-id="${env.id}" aria-label="Rename environment">Rename</button>
+                            <button class="btn btn-small btn-danger btn-delete" data-id="${env.id}" aria-label="Delete environment">Delete</button>
                         </div>
                     `;
                     card.querySelector('.notebook-card-info').addEventListener('click', () => {
-                        window.location.href = `/notebook/${nb.id}`;
+                        window.location.href = `/environment/${env.id}`;
                     });
                     card.querySelector('.btn-rename').addEventListener('click', (e) => {
                         e.stopPropagation();
-                        renameNotebook(nb.id, nb.name);
+                        renameEnvironment(env.id, env.name);
                     });
                     card.querySelector('.btn-delete').addEventListener('click', (e) => {
                         e.stopPropagation();
-                        deleteNotebook(nb.id, nb.name);
+                        deleteEnvironment(env.id, env.name);
                     });
                     listEl.appendChild(card);
                 });
         }
 
-        async function renameNotebook(id, currentName) {
-            const newName = prompt('Rename notebook:', currentName);
+        async function renameEnvironment(id, currentName) {
+            const newName = prompt('Rename environment:', currentName);
             if (newName && newName !== currentName) {
-                await api.put(`/api/notebooks/${id}`, { name: newName });
-                loadNotebooks();
+                await api.put(`/api/environments/${id}`, { name: newName });
+                loadEnvironments();
             }
         }
 
-        async function deleteNotebook(id, name) {
-            if (!confirm(`Delete "${name}"? This will remove the notebook and its container.`)) return;
+        async function deleteEnvironment(id, name) {
+            if (!confirm(`Delete "${name}"? This will remove the environment, all its notebooks, and its container.`)) return;
             const card = listEl.querySelector(`[data-id="${id}"]`)?.closest('.notebook-card');
             if (card) {
                 card.style.opacity = '0.5';
@@ -117,8 +119,8 @@
                 const btn = card.querySelector('.btn-delete');
                 if (btn) btn.textContent = 'Deleting...';
             }
-            await api.del(`/api/notebooks/${id}`);
-            loadNotebooks();
+            await api.del(`/api/environments/${id}`);
+            loadEnvironments();
         }
 
         function escapeHtml(text) {
@@ -127,7 +129,7 @@
             return div.innerHTML;
         }
 
-        const dialog = document.getElementById('new-notebook-dialog');
+        const dialog = document.getElementById('new-env-dialog');
         const dialogName = document.getElementById('dialog-name');
         const dialogPython = document.getElementById('dialog-python');
         const dialogGpu = document.getElementById('dialog-gpu');
@@ -135,7 +137,7 @@
         const dialogCancel = document.getElementById('dialog-cancel');
 
         newBtn.addEventListener('click', () => {
-            dialogName.value = 'Untitled Notebook';
+            dialogName.value = 'Untitled Environment';
             dialogPython.value = '3.11';
             dialogGpu.checked = false;
             dialog.style.display = 'flex';
@@ -153,8 +155,8 @@
         dialogCreate.addEventListener('click', async () => {
             dialogCreate.disabled = true;
             dialogCreate.textContent = 'Creating...';
-            const data = await api.post('/api/notebooks', {
-                name: dialogName.value || 'Untitled Notebook',
+            const data = await api.post('/api/environments', {
+                name: dialogName.value || 'Untitled Environment',
                 python_version: dialogPython.value,
                 gpu: dialogGpu.checked,
             });
@@ -162,11 +164,11 @@
             dialogCreate.textContent = 'Create';
             dialog.style.display = 'none';
             if (data && data.id) {
-                window.location.href = `/notebook/${data.id}`;
+                window.location.href = `/environment/${data.id}`;
             }
         });
 
-        loadNotebooks();
+        loadEnvironments();
     </script>
 </body>
 </html>

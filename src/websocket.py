@@ -12,21 +12,23 @@ from fastapi import WebSocket, WebSocketDisconnect
 from src.app import app
 from src.config import settings
 from src.container import ContainerService
+from src.environment import EnvironmentService
 from src.executor import ExecutorClient
 from src.models import ContainerStatus, ExecutionState, Output, OutputType
-from src.notebook import NotebookService
 
 logger = logging.getLogger(__name__)
 
-notebook_service = NotebookService()
+env_service = EnvironmentService()
 container_service = ContainerService()
 
-# Per-notebook state — reset on each new WebSocket connection
+# Per-notebook execution state
 execution_counts: dict[str, int] = {}
-active_executors: dict[str, ExecutorClient] = {}
 execution_locks: dict[str, asyncio.Lock] = {}
-# Track pending execute tasks so we can cancel them on reconnect
 _pending_tasks: dict[str, set[asyncio.Task]] = {}
+
+# Per-environment executor — shared across notebooks in the same env
+active_executors: dict[str, ExecutorClient] = {}  # keyed by environment_id
+_executor_refcounts: dict[str, int] = {}  # WS connections per env
 
 
 async def send_json(ws: WebSocket, data: dict) -> None:
@@ -37,7 +39,6 @@ async def send_json(ws: WebSocket, data: dict) -> None:
 
 
 def _cancel_stale_tasks(notebook_id: str) -> None:
-    """Cancel any leftover execute tasks from a previous connection."""
     tasks = _pending_tasks.pop(notebook_id, set())
     for task in tasks:
         if not task.done():
@@ -45,15 +46,14 @@ def _cancel_stale_tasks(notebook_id: str) -> None:
 
 
 async def _stream_image_build(
-    ws: WebSocket, notebook, tag: str
+    ws: WebSocket, env, tag: str
 ) -> None:
-    """Build a Docker image in a thread, streaming log lines to the client."""
     log_queue: queue.Queue[str | None] = queue.Queue()
 
     def _run_build():
         try:
             _, stream = container_service.build_image_streaming(
-                notebook.python_version, notebook.gpu
+                env.python_version, env.gpu
             )
             for chunk in stream:
                 if "error" in chunk:
@@ -63,7 +63,7 @@ async def _stream_image_build(
                 if line:
                     log_queue.put(line)
         finally:
-            log_queue.put(None)  # Sentinel: build done
+            log_queue.put(None)
 
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, _run_build)
@@ -85,9 +85,6 @@ async def _stream_image_build(
 def _drain_log_queue(
     log_queue: queue.Queue,
 ) -> tuple[list[str], bool]:
-    """Drain all available lines from the queue.
-    Returns (lines, is_done).
-    """
     lines: list[str] = []
     done = False
     while True:
@@ -104,22 +101,31 @@ def _drain_log_queue(
 
 async def _setup_connection(
     ws: WebSocket, notebook_id: str
-) -> ExecutorClient | None:
+) -> tuple[ExecutorClient | None, str]:
     """Validate notebook, start container, connect executor.
 
-    If the executor image doesn't exist, builds it and streams the
-    build log to the client over the WebSocket.
-    Returns executor on success, None on failure (ws closed).
+    Returns (executor, environment_id) on success, (None, "") on failure.
     """
-    notebook = notebook_service.get_notebook(notebook_id)
+    notebook = env_service.get_notebook(notebook_id)
     if notebook is None:
         await ws.close(code=4004, reason="Notebook not found")
-        return None
+        return None, ""
+
+    environment_id = notebook.environment_id
+    env = env_service.get_environment(environment_id)
+    if env is None:
+        await ws.close(code=4004, reason="Environment not found")
+        return None, ""
+
+    # Reuse existing executor for this environment if available
+    existing = active_executors.get(environment_id)
+    if existing is not None:
+        refcount = _executor_refcounts.get(environment_id, 0)
+        _executor_refcounts[environment_id] = refcount + 1
+        return existing, environment_id
 
     # Check if the image needs building
-    tag = container_service.get_image_tag(
-        notebook.python_version, notebook.gpu
-    )
+    tag = container_service.get_image_tag(env.python_version, env.gpu)
     if not container_service.has_image(tag):
         await send_json(ws, {
             "type": "container_state",
@@ -127,7 +133,7 @@ async def _setup_connection(
             "message": f"Building image {tag}...",
         })
         try:
-            await _stream_image_build(ws, notebook, tag)
+            await _stream_image_build(ws, env, tag)
         except Exception as e:
             await send_json(ws, {
                 "type": "container_state",
@@ -135,13 +141,13 @@ async def _setup_connection(
                 "message": f"Image build failed: {e}",
             })
             await ws.close(code=4010, reason="Image build failed")
-            return None
+            return None, ""
 
     # Start container (image now exists)
     state = container_service.start_container(
-        notebook_id,
-        python_version=notebook.python_version,
-        gpu=notebook.gpu,
+        environment_id,
+        python_version=env.python_version,
+        gpu=env.gpu,
     )
     await send_json(ws, {
         "type": "container_state",
@@ -151,10 +157,10 @@ async def _setup_connection(
 
     if state.status != ContainerStatus.READY:
         await ws.close(code=4010, reason="Container failed to start")
-        return None
+        return None, ""
 
     if settings.docker_network:
-        exec_host = container_service.get_container_name(notebook_id)
+        exec_host = container_service.get_container_name(environment_id)
         exec_port = settings.executor_port
     else:
         exec_host = "127.0.0.1"
@@ -170,9 +176,11 @@ async def _setup_connection(
             "message": str(e),
         })
         await ws.close(code=4010, reason="Cannot connect to executor")
-        return None
+        return None, ""
 
-    return executor
+    active_executors[environment_id] = executor
+    _executor_refcounts[environment_id] = 1
+    return executor, environment_id
 
 
 @app.websocket("/ws/notebooks/{notebook_id}")
@@ -180,42 +188,46 @@ async def notebook_websocket(
     ws: WebSocket, notebook_id: str
 ) -> None:
     await ws.accept()
-    print(f"[WS] accepted for {notebook_id[:8]}", flush=True)
+    print(f"[WS] accepted for notebook {notebook_id[:8]}", flush=True)
 
-    # Disconnect old executor and cancel stale tasks from prior connection
-    old_executor = active_executors.pop(notebook_id, None)
-    if old_executor:
-        await old_executor.disconnect()
-        print("[WS] disconnected old executor", flush=True)
+    # Cancel stale tasks from prior connection for this notebook
     _cancel_stale_tasks(notebook_id)
 
-    executor = await _setup_connection(ws, notebook_id)
+    executor, environment_id = await _setup_connection(ws, notebook_id)
     if executor is None:
         print("[WS] setup_connection failed", flush=True)
         return
 
-    print(f"[WS] executor connected on port {executor.port}", flush=True)
+    print(
+        f"[WS] executor connected port {executor.port}"
+        f" (env {environment_id[:8]})",
+        flush=True,
+    )
 
-    active_executors[notebook_id] = executor
     execution_locks[notebook_id] = asyncio.Lock()
     execution_counts.setdefault(notebook_id, 0)
     _pending_tasks[notebook_id] = set()
 
     try:
-        await _message_loop(ws, notebook_id, executor)
+        await _message_loop(ws, notebook_id, environment_id, executor)
     except WebSocketDisconnect:
         print(f"[WS] client disconnected {notebook_id[:8]}", flush=True)
     except Exception:
         logger.exception("WebSocket error for notebook %s", notebook_id)
     finally:
-        await executor.disconnect()
-        if active_executors.get(notebook_id) is executor:
-            active_executors.pop(notebook_id, None)
-            _cancel_stale_tasks(notebook_id)
+        _cancel_stale_tasks(notebook_id)
+        # Decrement refcount; only disconnect executor when no notebooks remain
+        count = _executor_refcounts.get(environment_id, 1) - 1
+        if count <= 0:
+            await executor.disconnect()
+            active_executors.pop(environment_id, None)
+            _executor_refcounts.pop(environment_id, None)
+        else:
+            _executor_refcounts[environment_id] = count
 
 
 async def _message_loop(
-    ws: WebSocket, notebook_id: str, executor: ExecutorClient
+    ws: WebSocket, notebook_id: str, environment_id: str, executor: ExecutorClient
 ) -> None:
     while True:
         raw = await ws.receive_text()
@@ -224,7 +236,7 @@ async def _message_loop(
 
         if msg_type == "execute":
             print(f"[WS] execute received: {msg.get('cell_id', '')[:8]}", flush=True)
-            container_service.record_activity(notebook_id)
+            container_service.record_activity(environment_id)
             task = asyncio.create_task(
                 _handle_execute(
                     ws, notebook_id,
@@ -251,7 +263,6 @@ async def _process_executor_msg(
     ws: WebSocket, cell_id: str, msg: dict,
     outputs: list[Output],
 ) -> str | None:
-    """Process one executor message. Returns final state if terminal."""
     msg_type = msg.get("type")
 
     if msg_type == "output":
@@ -332,7 +343,7 @@ async def _handle_execute(
             "execution_count": exec_count,
         })
 
-        notebook = notebook_service.get_notebook(notebook_id)
+        notebook = env_service.get_notebook(notebook_id)
         _set_cell_running(notebook, cell_id, exec_count)
 
         final_state, outputs = await _stream_execution(
@@ -406,4 +417,4 @@ def _persist_cell_outputs(
             cell.execution_count = exec_count
             cell.outputs = outputs
             break
-    notebook_service.save_notebook(notebook)
+    env_service.save_notebook(notebook)

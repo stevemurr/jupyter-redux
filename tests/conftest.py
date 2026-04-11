@@ -7,7 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from src.config import settings
-from src.models import Cell, CellType, Notebook
+from src.models import Cell, CellType, Environment, Notebook
 
 
 @pytest.fixture()
@@ -19,9 +19,19 @@ def tmp_data_dir(monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
-def sample_notebook() -> Notebook:
+def sample_environment() -> Environment:
+    return Environment(
+        name="Test Environment",
+        python_version="3.11",
+        gpu=False,
+    )
+
+
+@pytest.fixture()
+def sample_notebook(sample_environment: Environment) -> Notebook:
     return Notebook(
         name="Test Notebook",
+        environment_id=sample_environment.id,
         cells=[
             Cell(cell_type=CellType.CODE, source='print("hello")'),
             Cell(cell_type=CellType.MARKDOWN, source="# Title"),

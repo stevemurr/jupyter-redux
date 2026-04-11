@@ -7,6 +7,7 @@
 class NotebookEditor {
     constructor() {
         this.notebookId = getNotebookId();
+        this.environmentId = getEnvironmentId();
         this.notebook = null;
         this.cells = new Map(); // cellId -> CellComponent
         this.cellOrder = [];    // ordered cell IDs
@@ -79,8 +80,15 @@ class NotebookEditor {
         }
 
         this.notebook = data;
+        this.environmentId = data.environment_id || this.environmentId;
         this.titleInput.value = data.name;
         document.title = `${data.name} - Jupyter Redux`;
+
+        // Set back link to environment page
+        const backLink = document.getElementById('back-link');
+        if (backLink && this.environmentId) {
+            backLink.href = `/environment/${this.environmentId}`;
+        }
 
         for (const cellData of data.cells) {
             this._addCellComponent(cellData);

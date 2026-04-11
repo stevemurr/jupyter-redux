@@ -78,6 +78,12 @@ function getNotebookId() {
     return idx >= 0 ? parts[idx + 1] : null;
 }
 
+function getEnvironmentId() {
+    const parts = window.location.pathname.split('/');
+    const idx = parts.indexOf('environment');
+    return idx >= 0 ? parts[idx + 1] : null;
+}
+
 /**
  * Maps backend error details to actionable user-facing messages.
  */

@@ -22,8 +22,8 @@ Thumbs.db
 .env
 .env.*
 
-# Data (notebook JSON files are user data, not source)
-data/notebooks/*.json
+# Data (user data, not source)
+data/
 
 # Testing
 .coverage

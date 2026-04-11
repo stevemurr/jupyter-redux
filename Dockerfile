@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ src/
 
-RUN mkdir -p data/notebooks
+RUN mkdir -p data/environments data/notebooks
 
 EXPOSE 8000
 

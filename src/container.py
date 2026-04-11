@@ -1,4 +1,4 @@
-"""Docker container lifecycle management for notebook environments."""
+"""Docker container lifecycle management for environments."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from src.models import ContainerState, ContainerStatus
 
 logger = logging.getLogger(__name__)
 
-CONTAINER_PREFIX = "jredux"
-VOLUME_PREFIX = "jredux"
+CONTAINER_PREFIX = "jredux-env"
+VOLUME_PREFIX = "jredux-env"
 
 
 class ContainerService:
@@ -31,11 +31,11 @@ class ContainerService:
             self._client = docker.from_env()
         return self._client
 
-    def get_container_name(self, notebook_id: str) -> str:
-        return f"{CONTAINER_PREFIX}-{notebook_id}"
+    def get_container_name(self, environment_id: str) -> str:
+        return f"{CONTAINER_PREFIX}-{environment_id}"
 
-    def _volume_name(self, notebook_id: str) -> str:
-        return f"{VOLUME_PREFIX}-{notebook_id}"
+    def _volume_name(self, environment_id: str) -> str:
+        return f"{VOLUME_PREFIX}-{environment_id}"
 
     def get_image_tag(
         self,
@@ -66,7 +66,6 @@ class ContainerService:
         target = "gpu" if gpu else "cpu"
 
         logger.info("Building image %s ...", tag)
-        # Use low-level API client for streaming build output
         api = self.client.api
         stream = api.build(
             path=".",
@@ -81,12 +80,12 @@ class ContainerService:
 
     def create_container(
         self,
-        notebook_id: str,
+        environment_id: str,
         python_version: str = "3.11",
         gpu: bool = False,
     ) -> ContainerState:
-        name = self.get_container_name(notebook_id)
-        vol_name = self._volume_name(notebook_id)
+        name = self.get_container_name(environment_id)
+        vol_name = self._volume_name(environment_id)
 
         try:
             # Create volume if it doesn't exist
@@ -97,7 +96,6 @@ class ContainerService:
 
             image = self.get_image_tag(python_version, gpu)
 
-            # Build run kwargs
             run_kwargs: dict = {
                 "image": image,
                 "name": name,
@@ -110,8 +108,6 @@ class ContainerService:
                 },
             }
 
-            # Network mode: shared Docker network (compose)
-            # vs host port mapping (direct host mode)
             if settings.docker_network:
                 run_kwargs["network"] = settings.docker_network
             else:
@@ -119,7 +115,6 @@ class ContainerService:
                     f"{settings.executor_port}/tcp": None,
                 }
 
-            # GPU support — per-notebook, gated by global setting
             if gpu and settings.gpu_enabled:
                 try:
                     run_kwargs["device_requests"] = [
@@ -160,11 +155,11 @@ class ContainerService:
 
     def start_container(
         self,
-        notebook_id: str,
+        environment_id: str,
         python_version: str = "3.11",
         gpu: bool = False,
     ) -> ContainerState:
-        name = self.get_container_name(notebook_id)
+        name = self.get_container_name(environment_id)
         try:
             container = self.client.containers.get(name)
             if container.status != "running":
@@ -178,7 +173,7 @@ class ContainerService:
             )
         except docker.errors.NotFound:
             return self.create_container(
-                notebook_id, python_version, gpu
+                environment_id, python_version, gpu
             )
         except docker.errors.APIError as e:
             return ContainerState(
@@ -186,8 +181,8 @@ class ContainerService:
                 error_message=f"Failed to start container: {e.explanation}",
             )
 
-    def stop_container(self, notebook_id: str) -> ContainerState:
-        name = self.get_container_name(notebook_id)
+    def stop_container(self, environment_id: str) -> ContainerState:
+        name = self.get_container_name(environment_id)
         try:
             container = self.client.containers.get(name)
             container.stop(timeout=10)
@@ -203,9 +198,9 @@ class ContainerService:
                 error_message=f"Failed to stop container: {e.explanation}",
             )
 
-    def destroy_container(self, notebook_id: str) -> None:
-        name = self.get_container_name(notebook_id)
-        vol_name = self._volume_name(notebook_id)
+    def destroy_container(self, environment_id: str) -> None:
+        name = self.get_container_name(environment_id)
+        vol_name = self._volume_name(environment_id)
 
         try:
             container = self.client.containers.get(name)
@@ -224,8 +219,8 @@ class ContainerService:
         except docker.errors.APIError:
             logger.warning("Failed to remove volume %s", vol_name)
 
-    def get_container_status(self, notebook_id: str) -> ContainerState:
-        name = self.get_container_name(notebook_id)
+    def get_container_status(self, environment_id: str) -> ContainerState:
+        name = self.get_container_name(environment_id)
         try:
             container = self.client.containers.get(name)
             container.reload()
@@ -256,8 +251,8 @@ class ContainerService:
             return int(bindings[0]["HostPort"])
         return None
 
-    def record_activity(self, notebook_id: str) -> None:
-        self._last_activity[notebook_id] = time.time()
+    def record_activity(self, environment_id: str) -> None:
+        self._last_activity[environment_id] = time.time()
 
     async def start_idle_monitor(self) -> None:
         self._idle_task = asyncio.create_task(self._idle_monitor_loop())
@@ -273,13 +268,13 @@ class ContainerService:
     async def _idle_monitor_loop(self) -> None:
         timeout_seconds = settings.container_idle_timeout_minutes * 60
         while True:
-            await asyncio.sleep(60)  # Check every minute
+            await asyncio.sleep(60)
             now = time.time()
-            for notebook_id in list(self._last_activity.keys()):
-                last = self._last_activity.get(notebook_id, now)
+            for env_id in list(self._last_activity.keys()):
+                last = self._last_activity.get(env_id, now)
                 if now - last > timeout_seconds:
                     try:
-                        name = self.get_container_name(notebook_id)
+                        name = self.get_container_name(env_id)
                         container = self.client.containers.get(name)
                         if container.status == "running":
                             logger.info(
@@ -288,10 +283,10 @@ class ContainerService:
                                 (now - last) / 60,
                             )
                             container.stop(timeout=10)
-                            self._last_activity.pop(notebook_id, None)
+                            self._last_activity.pop(env_id, None)
                     except docker.errors.NotFound:
-                        self._last_activity.pop(notebook_id, None)
+                        self._last_activity.pop(env_id, None)
                     except Exception:
                         logger.warning(
-                            "Failed to stop idle container for %s", notebook_id
+                            "Failed to stop idle container for env %s", env_id
                         )

@@ -53,11 +53,19 @@ class Cell(BaseModel):
 class Notebook(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Untitled Notebook"
+    environment_id: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     cells: list[Cell] = Field(default_factory=list)
+
+
+class Environment(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Untitled Environment"
     python_version: str = "3.11"
     gpu: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ContainerState(BaseModel):
@@ -70,23 +78,44 @@ class ContainerState(BaseModel):
 class NotebookSummary(BaseModel):
     id: str
     name: str
+    environment_id: str
     created_at: datetime
     updated_at: datetime
-    python_version: str = "3.11"
-    gpu: bool = False
 
 
 class NotebookIndex(BaseModel):
     notebooks: list[NotebookSummary] = Field(default_factory=list)
 
 
+class EnvironmentSummary(BaseModel):
+    id: str
+    name: str
+    python_version: str = "3.11"
+    gpu: bool = False
+    notebook_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class EnvironmentIndex(BaseModel):
+    environments: list[EnvironmentSummary] = Field(default_factory=list)
+
+
 # --- Request/Response models for the REST API ---
+
+
+class CreateEnvironmentRequest(BaseModel):
+    name: str = "Untitled Environment"
+    python_version: str = "3.11"
+    gpu: bool = False
+
+
+class UpdateEnvironmentRequest(BaseModel):
+    name: str | None = None
 
 
 class CreateNotebookRequest(BaseModel):
     name: str = "Untitled Notebook"
-    python_version: str = "3.11"
-    gpu: bool = False
 
 
 class UpdateNotebookRequest(BaseModel):
@@ -108,9 +137,25 @@ class ReorderCellsRequest(BaseModel):
     cell_ids: list[str]
 
 
+class EnvironmentResponse(BaseModel):
+    id: str
+    name: str
+    python_version: str
+    gpu: bool
+    created_at: datetime
+    updated_at: datetime
+    notebooks: list[NotebookSummary] = Field(default_factory=list)
+    container_state: ContainerState = Field(default_factory=ContainerState)
+
+
+class EnvironmentListResponse(BaseModel):
+    environments: list[EnvironmentSummary]
+
+
 class NotebookResponse(BaseModel):
     id: str
     name: str
+    environment_id: str
     created_at: datetime
     updated_at: datetime
     cells: list[Cell]

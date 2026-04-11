@@ -8,26 +8,29 @@ from fastapi.staticfiles import StaticFiles
 
 from src.models import (
     AddCellRequest,
+    ContainerState,
     ContainerStateResponse,
+    CreateEnvironmentRequest,
     CreateNotebookRequest,
-    NotebookListResponse,
+    EnvironmentListResponse,
+    EnvironmentResponse,
     NotebookResponse,
     ReorderCellsRequest,
     UpdateCellRequest,
+    UpdateEnvironmentRequest,
     UpdateNotebookRequest,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start idle monitor on startup
     csvc = _get_container_service()
     await csvc.start_idle_monitor()
     yield
     await csvc.stop_idle_monitor()
 
 
-app = FastAPI(title="Jupyter Redux", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Jupyter Redux", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,20 +74,19 @@ async def health_check() -> dict:
     return {"status": "ok"}
 
 
-# --- Notebook CRUD ---
+# --- Lazy service singletons ---
 
-# Lazy imports to avoid circular deps at module level
-_notebook_service = None
+_env_service = None
 _container_service = None
 
 
-def _get_notebook_service():
-    global _notebook_service
-    if _notebook_service is None:
-        from src.notebook import NotebookService
+def _get_env_service():
+    global _env_service
+    if _env_service is None:
+        from src.environment import EnvironmentService
 
-        _notebook_service = NotebookService()
-    return _notebook_service
+        _env_service = EnvironmentService()
+    return _env_service
 
 
 def _get_container_service():
@@ -96,12 +98,151 @@ def _get_container_service():
     return _container_service
 
 
-def _build_response(notebook, container_state=None) -> NotebookResponse:
-    from src.models import ContainerState
+# --- Environment CRUD ---
 
+
+def _build_env_response(
+    env, notebooks=None, container_state=None,
+) -> EnvironmentResponse:
+    return EnvironmentResponse(
+        id=env.id,
+        name=env.name,
+        python_version=env.python_version,
+        gpu=env.gpu,
+        created_at=env.created_at,
+        updated_at=env.updated_at,
+        notebooks=notebooks or [],
+        container_state=container_state or ContainerState(),
+    )
+
+
+@app.get("/api/environments", response_model=EnvironmentListResponse)
+async def list_environments() -> EnvironmentListResponse:
+    svc = _get_env_service()
+    index = svc.list_environments()
+    return EnvironmentListResponse(environments=index.environments)
+
+
+@app.post("/api/environments", response_model=EnvironmentResponse, status_code=201)
+async def create_environment(req: CreateEnvironmentRequest) -> EnvironmentResponse:
+    svc = _get_env_service()
+
+    # Auto-deduplicate name
+    index = svc.list_environments()
+    existing_names = {e.name for e in index.environments}
+    name = req.name
+    counter = 1
+    while name in existing_names:
+        counter += 1
+        name = f"{req.name} {counter}"
+
+    env = svc.create_environment(
+        name, python_version=req.python_version, gpu=req.gpu
+    )
+    return _build_env_response(env)
+
+
+@app.get("/api/environments/{env_id}", response_model=EnvironmentResponse)
+async def get_environment(env_id: str) -> EnvironmentResponse:
+    svc = _get_env_service()
+    csvc = _get_container_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+    notebooks = svc.list_notebooks(env_id)
+    container_state = csvc.get_container_status(env_id)
+    return _build_env_response(env, notebooks.notebooks, container_state)
+
+
+@app.put("/api/environments/{env_id}", response_model=EnvironmentResponse)
+async def update_environment(
+    env_id: str, req: UpdateEnvironmentRequest
+) -> EnvironmentResponse:
+    svc = _get_env_service()
+    csvc = _get_container_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+
+    if req.name is not None:
+        index = svc.list_environments()
+        for e in index.environments:
+            if e.name == req.name and e.id != env_id:
+                raise HTTPException(409, f"Environment '{req.name}' already exists")
+        env.name = req.name
+
+    svc.save_environment(env)
+    notebooks = svc.list_notebooks(env_id)
+    container_state = csvc.get_container_status(env_id)
+    return _build_env_response(env, notebooks.notebooks, container_state)
+
+
+@app.delete("/api/environments/{env_id}", status_code=204)
+async def delete_environment(env_id: str) -> None:
+    svc = _get_env_service()
+    csvc = _get_container_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+    svc.delete_environment(env_id)
+    try:
+        csvc.destroy_container(env_id)
+    except Exception:
+        pass
+
+
+# --- Container Management (environment level) ---
+
+
+@app.post("/api/environments/{env_id}/container/start")
+async def start_container(env_id: str) -> ContainerStateResponse:
+    svc = _get_env_service()
+    csvc = _get_container_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+    state = csvc.start_container(env_id, env.python_version, env.gpu)
+    return ContainerStateResponse(
+        status=state.status,
+        container_id=state.container_id,
+        error_message=state.error_message,
+    )
+
+
+@app.post("/api/environments/{env_id}/container/stop")
+async def stop_container(env_id: str) -> ContainerStateResponse:
+    svc = _get_env_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+    csvc = _get_container_service()
+    state = csvc.stop_container(env_id)
+    return ContainerStateResponse(
+        status=state.status,
+        container_id=state.container_id,
+        error_message=state.error_message,
+    )
+
+
+@app.get("/api/environments/{env_id}/container/status")
+async def container_status(env_id: str) -> ContainerStateResponse:
+    csvc = _get_container_service()
+    state = csvc.get_container_status(env_id)
+    return ContainerStateResponse(
+        status=state.status,
+        container_id=state.container_id,
+        error_message=state.error_message,
+    )
+
+
+# --- Notebook CRUD ---
+
+
+def _build_notebook_response(notebook, container_state=None) -> NotebookResponse:
     return NotebookResponse(
         id=notebook.id,
         name=notebook.name,
+        environment_id=notebook.environment_id,
         created_at=notebook.created_at,
         updated_at=notebook.updated_at,
         cells=notebook.cells,
@@ -109,82 +250,71 @@ def _build_response(notebook, container_state=None) -> NotebookResponse:
     )
 
 
-@app.get("/api/notebooks", response_model=NotebookListResponse)
-async def list_notebooks() -> NotebookListResponse:
-    svc = _get_notebook_service()
-    index = svc.list_notebooks()
-    return NotebookListResponse(notebooks=index.notebooks)
+@app.post(
+    "/api/environments/{env_id}/notebooks",
+    response_model=NotebookResponse,
+    status_code=201,
+)
+async def create_notebook(env_id: str, req: CreateNotebookRequest) -> NotebookResponse:
+    svc = _get_env_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
 
-
-@app.post("/api/notebooks", response_model=NotebookResponse, status_code=201)
-async def create_notebook(req: CreateNotebookRequest) -> NotebookResponse:
-    svc = _get_notebook_service()
-
-    # Auto-deduplicate name (like Jupyter: "Untitled Notebook 1", etc.)
-    index = svc.list_notebooks()
-    existing_names = {nb.name for nb in index.notebooks}
+    # Auto-deduplicate name within this environment
+    nb_index = svc.list_notebooks(env_id)
+    existing_names = {nb.name for nb in nb_index.notebooks}
     name = req.name
     counter = 1
     while name in existing_names:
         counter += 1
         name = f"{req.name} {counter}"
 
-    notebook = svc.create_notebook(
-        name, python_version=req.python_version, gpu=req.gpu
-    )
-
-    # Container provisioning is deferred to WebSocket connection
-    return _build_response(notebook)
+    notebook = svc.create_notebook(env_id, name)
+    container_state = _get_container_service().get_container_status(env_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 @app.get("/api/notebooks/{notebook_id}", response_model=NotebookResponse)
 async def get_notebook(notebook_id: str) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
         raise HTTPException(404, "Notebook not found")
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
-@app.put(
-    "/api/notebooks/{notebook_id}",
-    response_model=NotebookResponse,
-)
+@app.put("/api/notebooks/{notebook_id}", response_model=NotebookResponse)
 async def update_notebook(
     notebook_id: str, req: UpdateNotebookRequest
 ) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
         raise HTTPException(404, "Notebook not found")
 
     if req.name is not None:
-        index = svc.list_notebooks()
-        for nb in index.notebooks:
+        nb_index = svc.list_notebooks(notebook.environment_id)
+        for nb in nb_index.notebooks:
             if nb.name == req.name and nb.id != notebook_id:
                 raise HTTPException(409, f"Notebook '{req.name}' already exists")
         notebook.name = req.name
 
     svc.save_notebook(notebook)
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 @app.delete("/api/notebooks/{notebook_id}", status_code=204)
 async def delete_notebook(notebook_id: str) -> None:
-    svc = _get_notebook_service()
-    csvc = _get_container_service()
+    svc = _get_env_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
         raise HTTPException(404, "Notebook not found")
     svc.delete_notebook(notebook_id)
-    try:
-        csvc.destroy_container(notebook_id)
-    except Exception:
-        pass  # Best-effort: notebook data is already gone
 
 
 # --- Cell CRUD ---
@@ -196,14 +326,14 @@ async def delete_notebook(notebook_id: str) -> None:
     status_code=201,
 )
 async def add_cell(notebook_id: str, req: AddCellRequest) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
         raise HTTPException(404, "Notebook not found")
     notebook = svc.add_cell(notebook, req.cell_type, req.source, req.position)
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 @app.put(
@@ -213,7 +343,7 @@ async def add_cell(notebook_id: str, req: AddCellRequest) -> NotebookResponse:
 async def update_cell(
     notebook_id: str, cell_id: str, req: UpdateCellRequest
 ) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
@@ -221,8 +351,8 @@ async def update_cell(
     notebook = svc.update_cell(notebook, cell_id, req.source, req.cell_type)
     if notebook is None:
         raise HTTPException(404, "Cell not found")
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 @app.delete(
@@ -230,7 +360,7 @@ async def update_cell(
     response_model=NotebookResponse,
 )
 async def delete_cell(notebook_id: str, cell_id: str) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
@@ -238,8 +368,8 @@ async def delete_cell(notebook_id: str, cell_id: str) -> NotebookResponse:
     notebook = svc.delete_cell(notebook, cell_id)
     if notebook is None:
         raise HTTPException(404, "Cell not found")
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 @app.post(
@@ -247,7 +377,7 @@ async def delete_cell(notebook_id: str, cell_id: str) -> NotebookResponse:
     response_model=NotebookResponse,
 )
 async def reorder_cells(notebook_id: str, req: ReorderCellsRequest) -> NotebookResponse:
-    svc = _get_notebook_service()
+    svc = _get_env_service()
     csvc = _get_container_service()
     notebook = svc.get_notebook(notebook_id)
     if notebook is None:
@@ -255,48 +385,8 @@ async def reorder_cells(notebook_id: str, req: ReorderCellsRequest) -> NotebookR
     notebook = svc.reorder_cells(notebook, req.cell_ids)
     if notebook is None:
         raise HTTPException(400, "Cell IDs do not match existing cells")
-    container_state = csvc.get_container_status(notebook_id)
-    return _build_response(notebook, container_state)
-
-
-# --- Container Management ---
-
-
-@app.post("/api/notebooks/{notebook_id}/container/start")
-async def start_container(notebook_id: str) -> ContainerStateResponse:
-    svc = _get_notebook_service()
-    csvc = _get_container_service()
-    notebook = svc.get_notebook(notebook_id)
-    if notebook is None:
-        raise HTTPException(404, "Notebook not found")
-    state = csvc.start_container(notebook_id)
-    return ContainerStateResponse(
-        status=state.status,
-        container_id=state.container_id,
-        error_message=state.error_message,
-    )
-
-
-@app.post("/api/notebooks/{notebook_id}/container/stop")
-async def stop_container(notebook_id: str) -> ContainerStateResponse:
-    csvc = _get_container_service()
-    state = csvc.stop_container(notebook_id)
-    return ContainerStateResponse(
-        status=state.status,
-        container_id=state.container_id,
-        error_message=state.error_message,
-    )
-
-
-@app.get("/api/notebooks/{notebook_id}/container/status")
-async def container_status(notebook_id: str) -> ContainerStateResponse:
-    csvc = _get_container_service()
-    state = csvc.get_container_status(notebook_id)
-    return ContainerStateResponse(
-        status=state.status,
-        container_id=state.container_id,
-        error_message=state.error_message,
-    )
+    container_state = csvc.get_container_status(notebook.environment_id)
+    return _build_notebook_response(notebook, container_state)
 
 
 # --- Static files / SPA ---
@@ -319,8 +409,16 @@ async def serve_index() -> FileResponse:
     return FileResponse(str(static_dir / "index.html"))
 
 
-@app.get("/notebook/{notebook_id}")
-async def serve_notebook_page(notebook_id: str) -> FileResponse:
+@app.get("/environment/{env_id}")
+async def serve_environment_page(env_id: str) -> FileResponse:
+    return FileResponse(
+        str(static_dir / "environment.html"),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/environment/{env_id}/notebook/{notebook_id}")
+async def serve_notebook_page(env_id: str, notebook_id: str) -> FileResponse:
     return FileResponse(
         str(static_dir / "notebook.html"),
         headers={"Cache-Control": "no-store"},

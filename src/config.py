@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
-    data_dir: Path = Path("data/notebooks")
+    data_dir: Path = Path("data")
     docker_base_image: str = "jupyter-redux-base:latest"
     executor_port: int = 9999
     container_idle_timeout_minutes: int = 30
