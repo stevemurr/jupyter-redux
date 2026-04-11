@@ -1,0 +1,39 @@
+[project]
+name = "jupyter-redux"
+version = "0.1.0"
+description = "Browser-based notebook application with per-notebook container environments"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes (F401 unused imports, F841 unused vars)
+    "I",     # isort (I001 import sorting)
+    "C90",   # mccabe complexity
+    "B",     # flake8-bugbear
+    "UP",    # pyupgrade
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.black]
+target-version = ["py311"]
+line-length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--cov=src --cov-fail-under=80 -v"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/executor/*"]
+
+[tool.coverage.report]
+show_missing = true

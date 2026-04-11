@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notebook - Jupyter Redux</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+
+    <!-- CodeMirror 6 — single esbuild bundle, no duplicate instance issues -->
+    <script type="module">
+        import {
+            EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
+            EditorState, defaultKeymap, python,
+            syntaxHighlighting, defaultHighlightStyle, oneDark
+        } from '/static/js/cm-bundle.js';
+
+        window.EditorView = EditorView;
+        window.EditorState = EditorState;
+        window.keymap = keymap;
+        window.defaultKeymap = defaultKeymap;
+        window.python = python;
+        window.lineNumbers = lineNumbers;
+        window.highlightActiveLine = highlightActiveLine;
+        window.highlightActiveLineGutter = highlightActiveLineGutter;
+        window.syntaxHighlighting = syntaxHighlighting;
+        window.defaultHighlightStyle = defaultHighlightStyle;
+        window.oneDark = oneDark;
+
+        window.dispatchEvent(new Event('codemirror-ready'));
+    </script>
+</head>
+<body class="notebook-page">
+    <!-- Toolbar -->
+    <div class="notebook-toolbar" role="toolbar" aria-label="Notebook toolbar">
+        <a href="/" class="btn btn-small" aria-label="Back to notebook list">&larr; Back</a>
+        <div class="toolbar-separator"></div>
+        <input type="text" class="notebook-title" id="notebook-title"
+               aria-label="Notebook name" placeholder="Untitled Notebook">
+        <div class="toolbar-separator"></div>
+        <button class="btn btn-small" id="btn-add-code" aria-label="Add code cell">+ Code</button>
+        <button class="btn btn-small" id="btn-add-markdown" aria-label="Add markdown cell">+ Markdown</button>
+        <button class="btn btn-small" id="btn-run-all" aria-label="Run all cells">Run All</button>
+        <button class="btn btn-small btn-stop" id="btn-interrupt" aria-label="Interrupt execution"
+                style="display:none;">Stop</button>
+        <div class="toolbar-spacer"></div>
+        <span class="save-indicator" id="save-indicator" aria-live="polite"></span>
+        <div class="container-badge none" id="container-badge" aria-live="polite">
+            <span class="badge-dot">&#9679;</span> <span class="badge-text">No container</span>
+        </div>
+        <div class="gpu-badge unavailable" id="gpu-badge" style="display:none;">
+            GPU
+        </div>
+    </div>
+
+    <!-- Build log (shown during image builds) -->
+    <div class="build-log" id="build-log" style="display:none;">
+        <div class="build-log-header">
+            <span class="build-log-title">Building container image...</span>
+        </div>
+        <pre class="build-log-content" id="build-log-content"></pre>
+    </div>
+
+    <!-- Cells -->
+    <div class="cells-container" id="cells-container" role="list" aria-label="Notebook cells">
+    </div>
+
+    <!-- Mode indicator -->
+    <div class="mode-indicator command" id="mode-indicator" aria-live="polite">COMMAND</div>
+
+    <!-- Scripts (cache-bust with version param) -->
+    <script src="/static/js/app.js?v=3"></script>
+    <script src="/static/js/ws.js?v=3"></script>
+    <script src="/static/js/cell.js?v=3"></script>
+    <script src="/static/js/notebook.js?v=3"></script>
+</body>
+</html>

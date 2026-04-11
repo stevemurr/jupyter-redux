@@ -1,0 +1,31 @@
+services:
+  # Build the executor base image used by notebook containers
+  executor-base:
+    build:
+      context: .
+      dockerfile: src/executor/Dockerfile
+      target: cpu
+    image: jupyter-redux-base:latest
+    entrypoint: ["true"]
+    restart: "no"
+
+  server:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    environment:
+      - JREDUX_DOCKER_NETWORK=jredux
+      - JREDUX_GPU_ENABLED=${JREDUX_GPU_ENABLED:-true}
+    networks:
+      - jredux
+    depends_on:
+      executor-base:
+        condition: service_completed_successfully
+
+networks:
+  jredux:
+    name: jredux
+    driver: bridge
