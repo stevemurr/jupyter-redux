@@ -309,7 +309,16 @@ class Monitor:
         })
 
     def log(self, step=None, **metrics):
-        """Log metrics for one step. Auto-increments step if omitted."""
+        """Log metrics for one step. Auto-increments step if omitted.
+
+        If epoch/step/iter is passed as a metric and step= is not set,
+        it is extracted and used as the step value.
+        """
+        if step is None:
+            for key in ("epoch", "step", "iter", "iteration"):
+                if key in metrics:
+                    step = int(metrics.pop(key))
+                    break
         if step is None:
             step = self._step
             self._step += 1

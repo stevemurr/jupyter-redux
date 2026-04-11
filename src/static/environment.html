@@ -935,13 +935,6 @@
                 cell.outputEl.appendChild(container);
                 showCellOutput(cell);
 
-                // Size canvas to container after it's in the DOM
-                requestAnimationFrame(() => {
-                    const w = container.clientWidth - 24;
-                    canvas.width = Math.max(300, w) * (window.devicePixelRatio || 1);
-                    canvas.style.width = Math.max(300, w) + 'px';
-                });
-
                 cell.monitors[did] = {
                     container, canvas, ctx: canvas.getContext('2d'),
                     legend, table, progressEl,
@@ -982,8 +975,14 @@
         }
 
         function drawMonitorChart(mon) {
-            const { canvas, ctx, series, keyOrder } = mon;
+            const { canvas, ctx, series, keyOrder, container } = mon;
             const dpr = window.devicePixelRatio || 1;
+            // Size canvas to container width on every draw
+            const cw = Math.max(300, container.clientWidth - 24);
+            canvas.width = cw * dpr;
+            canvas.height = 200 * dpr;
+            canvas.style.width = cw + 'px';
+            canvas.style.height = '200px';
             const W = canvas.width, H = canvas.height;
             const pad = { top: 10*dpr, right: 15*dpr, bottom: 30*dpr, left: 55*dpr };
             const plotW = W - pad.left - pad.right;
