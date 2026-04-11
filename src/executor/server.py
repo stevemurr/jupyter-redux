@@ -21,10 +21,18 @@ PORT = 9999
 BUFFER_SIZE = 65536
 MAX_DISPLAY_BYTES = 10 * 1024 * 1024  # 10MB
 
-namespace: dict = {}
+namespaces: dict[str, dict] = {}
 current_thread: threading.Thread | None = None
 # Reference to the current connection for display functions
 _current_conn: socket.socket | None = None
+
+
+def _get_namespace(notebook_id: str = "") -> dict:
+    """Return the namespace for a notebook, creating it if needed."""
+    key = notebook_id or "__default__"
+    if key not in namespaces:
+        namespaces[key] = {}
+    return namespaces[key]
 
 
 def send_message(conn: socket.socket, msg: dict) -> None:
@@ -211,10 +219,13 @@ def execute_shell(conn: socket.socket, command: str) -> None:
         })
 
 
-def execute_code(conn: socket.socket, code: str) -> None:
+def execute_code(
+    conn: socket.socket, code: str, notebook_id: str = "",
+) -> None:
     global _current_conn
     _current_conn = conn
-    namespace["display_audio"] = display_audio
+    ns = _get_namespace(notebook_id)
+    ns["display_audio"] = display_audio
 
     old_stdout = sys.stdout
     old_stderr = sys.stderr
@@ -225,13 +236,13 @@ def execute_code(conn: socket.socket, code: str) -> None:
 
         # Try eval first for expressions, fall back to exec
         try:
-            result = eval(code, namespace)  # noqa: S307
+            result = eval(code, ns)  # noqa: S307
             if result is not None:
                 send_message(conn, {
                     "type": "result", "data": repr(result),
                 })
         except SyntaxError:
-            exec(code, namespace)  # noqa: S102
+            exec(code, ns)  # noqa: S102
 
     except KeyboardInterrupt:
         send_message(conn, {
@@ -256,6 +267,7 @@ def handle_message(conn: socket.socket, msg: dict) -> None:
     msg_type = msg.get("type")
     if msg_type == "execute":
         code = msg.get("code", "")
+        notebook_id = msg.get("notebook_id", "")
         send_message(conn, {"type": "state", "execution_state": "running"})
 
         if is_pip_command(code):
@@ -274,7 +286,7 @@ def handle_message(conn: socket.socket, msg: dict) -> None:
         elif is_shell_command(code):
             execute_shell(conn, code[1:].strip())
         else:
-            execute_code(conn, code)
+            execute_code(conn, code, notebook_id)
 
         send_message(conn, {"type": "state", "execution_state": "completed"})
 

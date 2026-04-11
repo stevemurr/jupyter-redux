@@ -67,8 +67,13 @@ class ExecutorClient:
         except (json.JSONDecodeError, ConnectionError):
             return None
 
-    async def execute(self, code: str) -> AsyncGenerator[dict, None]:
-        await self._send({"type": "execute", "code": code})
+    async def execute(
+        self, code: str, notebook_id: str = "",
+    ) -> AsyncGenerator[dict, None]:
+        msg: dict = {"type": "execute", "code": code}
+        if notebook_id:
+            msg["notebook_id"] = notebook_id
+        await self._send(msg)
 
         while True:
             msg = await self._recv_line()

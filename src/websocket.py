@@ -347,7 +347,7 @@ async def _handle_execute(
         _set_cell_running(notebook, cell_id, exec_count)
 
         final_state, outputs = await _stream_execution(
-            ws, cell_id, code, executor
+            ws, cell_id, code, executor, notebook_id
         )
         print(f"[WS] execution done: {final_state} {cell_id[:8]}", flush=True)
 
@@ -366,13 +366,13 @@ async def _handle_execute(
 
 async def _stream_execution(
     ws: WebSocket, cell_id: str, code: str,
-    executor: ExecutorClient,
+    executor: ExecutorClient, notebook_id: str = "",
 ) -> tuple[str, list[Output]]:
     final_state = "completed"
     outputs: list[Output] = []
 
     try:
-        async for msg in executor.execute(code):
+        async for msg in executor.execute(code, notebook_id):
             terminal = await _process_executor_msg(
                 ws, cell_id, msg, outputs
             )
