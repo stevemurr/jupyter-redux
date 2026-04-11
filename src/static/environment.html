@@ -139,10 +139,11 @@
 
     <!-- Install prompt dialog -->
     <div class="dialog-overlay" id="install-dialog" style="display:none;">
-        <div class="dialog">
+        <div class="dialog" style="width:520px;">
             <h2 class="dialog-title">Project Detected</h2>
             <p id="install-message" style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:12px;"></p>
             <div id="install-markers" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--accent-cyan);margin-bottom:16px;"></div>
+            <pre id="install-log" style="display:none;background:var(--bg-output);border:1px solid var(--border-default);border-radius:4px;padding:8px 10px;font-family:var(--font-mono);font-size:0.75rem;line-height:1.5;color:var(--text-secondary);max-height:250px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;margin-bottom:12px;"></pre>
             <div id="install-status" style="display:none;font-size:0.85rem;margin-bottom:12px;"></div>
             <div class="dialog-actions">
                 <button class="btn" id="install-skip">Skip</button>
@@ -810,17 +811,48 @@
         // =====================================================================
         //  CLONE / INSTALL DIALOGS (unchanged logic)
         // =====================================================================
-        async function doInstallRepo(name) {
+        async function streamInstall(name) {
+            const logEl = document.getElementById('install-log');
             const is = document.getElementById('install-status');
-            is.style.display = 'block'; is.style.color = 'var(--accent-yellow)'; is.textContent = `Installing ${name}...`;
+            logEl.style.display = 'block';
+            logEl.textContent = '';
+            is.style.display = 'block';
+            is.style.color = 'var(--accent-yellow)';
+            is.textContent = 'Running pip install -e ...';
+
+            try {
+                const url = `/api/environments/${envId}/repos/install-stream?repo_name=${encodeURIComponent(name)}`;
+                const res = await fetch(url);
+                if (!res.ok) {
+                    is.style.color = 'var(--accent-red)';
+                    is.textContent = 'Installation failed.';
+                    return false;
+                }
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    logEl.textContent += decoder.decode(value, { stream: true });
+                    logEl.scrollTop = logEl.scrollHeight;
+                }
+                is.style.color = 'var(--accent-green)';
+                is.textContent = 'Installed successfully. Package is now importable.';
+                return true;
+            } catch (e) {
+                is.style.color = 'var(--accent-red)';
+                is.textContent = 'Installation failed.';
+                return false;
+            }
+        }
+
+        async function doInstallRepo(name) {
             document.getElementById('install-dialog').style.display = 'flex';
             document.getElementById('install-message').textContent = `Installing "${name}"...`;
             document.getElementById('install-markers').textContent = '';
             document.getElementById('install-run').style.display = 'none';
             document.getElementById('install-skip').textContent = 'Close';
-            const r = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: name });
-            is.style.color = r ? 'var(--accent-green)' : 'var(--accent-red)';
-            is.textContent = r ? 'Installed successfully.' : 'Installation failed.';
+            await streamInstall(name);
         }
 
         const cloneDialog = document.getElementById('clone-dialog');
@@ -858,19 +890,20 @@
             const msg = document.getElementById('install-message');
             const markers = document.getElementById('install-markers');
             const is = document.getElementById('install-status');
+            const logEl = document.getElementById('install-log');
             const runBtn = document.getElementById('install-run');
             const skipBtn = document.getElementById('install-skip');
             msg.textContent = `"${repoName}" is installable. Install as editable package?`;
             markers.textContent = 'Found: ' + project.markers_found.join(', ');
-            is.style.display = 'none'; runBtn.style.display = 'inline-flex'; runBtn.disabled = false;
+            is.style.display = 'none'; logEl.style.display = 'none';
+            runBtn.style.display = 'inline-flex'; runBtn.disabled = false;
             runBtn.textContent = 'Install as Editable Package'; skipBtn.textContent = 'Skip';
             document.getElementById('install-dialog').style.display = 'flex';
             runBtn.onclick = async () => {
                 runBtn.disabled = true; runBtn.textContent = 'Installing...';
-                is.style.display = 'block'; is.style.color = 'var(--accent-yellow)'; is.textContent = 'Running pip install -e ...';
-                const r = await api.post(`/api/environments/${envId}/repos/install`, { repo_name: repoName });
-                if (r) { is.style.color = 'var(--accent-green)'; is.textContent = 'Installed.'; runBtn.style.display = 'none'; skipBtn.textContent = 'Done'; }
-                else { is.style.color = 'var(--accent-red)'; is.textContent = 'Failed.'; runBtn.disabled = false; runBtn.textContent = 'Retry'; }
+                const ok = await streamInstall(repoName);
+                if (ok) { runBtn.style.display = 'none'; skipBtn.textContent = 'Done'; }
+                else { runBtn.disabled = false; runBtn.textContent = 'Retry'; }
             };
         }
         document.getElementById('install-skip').addEventListener('click', () => { document.getElementById('install-dialog').style.display = 'none'; });

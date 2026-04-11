@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.models import (
@@ -367,6 +367,17 @@ async def install_repo(
     csvc = _require_running_env(env_id)
     output = csvc.install_repo(env_id, req.repo_name)
     return {"repo_name": req.repo_name, "output": output}
+
+
+@app.get("/api/environments/{env_id}/repos/install-stream")
+async def install_repo_stream(
+    env_id: str, repo_name: str,
+) -> StreamingResponse:
+    csvc = _require_running_env(env_id)
+    return StreamingResponse(
+        csvc.install_repo_stream(env_id, repo_name),
+        media_type="text/plain",
+    )
 
 
 @app.delete(

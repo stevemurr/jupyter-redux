@@ -480,6 +480,24 @@ class ContainerService:
         )
         return output.decode(errors="replace")
 
+    def install_repo_stream(
+        self, environment_id: str, repo_name: str,
+    ):
+        """Run pip install -e, yielding output chunks as they arrive."""
+        container = self._get_running_container(environment_id)
+        dest = f"{self.REPOS_ROOT}/{repo_name}"
+
+        exit_code, _ = container.exec_run(["test", "-d", dest])
+        if exit_code != 0:
+            raise FileNotFoundError(f"Repo '{repo_name}' not found")
+
+        _, stream = container.exec_run(
+            ["pip", "install", "-e", dest],
+            stream=True,
+        )
+        for chunk in stream:
+            yield chunk.decode(errors="replace")
+
     def list_repos(self, environment_id: str) -> list[dict]:
         """List cloned repos under /env/repos/."""
         container = self._get_running_container(environment_id)
