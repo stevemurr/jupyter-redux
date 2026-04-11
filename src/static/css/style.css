@@ -1023,6 +1023,56 @@ input:focus-visible {
     border-radius: 8px 0 0 8px;
     background: var(--bg-secondary);
     overflow: hidden;
+    transition: width 0.2s ease, min-width 0.2s ease;
+}
+
+.env-sidebar.collapsed {
+    width: 40px;
+    min-width: 40px;
+}
+
+.env-sidebar.collapsed .sidebar-header h3,
+.env-sidebar.collapsed .sidebar-actions,
+.env-sidebar.collapsed .file-tree,
+.env-sidebar.collapsed .file-tree-empty,
+.env-sidebar.collapsed #notebook-list,
+.env-sidebar.collapsed #repo-list {
+    display: none;
+}
+
+.env-sidebar.collapsed .sidebar-header {
+    justify-content: center;
+    padding: 10px 4px;
+}
+
+.sidebar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    padding: 6px 0;
+    background: var(--bg-tertiary);
+    border: none;
+    border-bottom: 1px solid var(--border-default);
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: color 0.15s;
+    flex-shrink: 0;
+}
+
+.sidebar-toggle:hover {
+    color: var(--text-primary);
+    background: var(--bg-cell-selected);
+}
+
+/* Collapsed: icons shown as vertical strip */
+.env-sidebar.collapsed .sidebar-header {
+    border-bottom: none;
+}
+
+.env-sidebar.collapsed .sidebar-collapse-icon {
+    display: none;
 }
 
 .env-main {

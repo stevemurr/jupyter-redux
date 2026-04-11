@@ -44,7 +44,10 @@
 
     <div class="env-layout">
         <!-- Sidebar -->
-        <div class="env-sidebar">
+        <div class="env-sidebar" id="env-sidebar">
+            <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
+                <span id="toggle-icon">&#9664;</span>
+            </button>
             <div class="sidebar-header">
                 <h3>Files</h3>
                 <div class="sidebar-actions">
@@ -170,6 +173,23 @@
         const notebookList = document.getElementById('notebook-list');
         const repoList = document.getElementById('repo-list');
         const repoListEmpty = document.getElementById('repo-list-empty');
+        const sidebar = document.getElementById('env-sidebar');
+        const toggleBtn = document.getElementById('sidebar-toggle');
+        const toggleIcon = document.getElementById('toggle-icon');
+
+        // --- Sidebar collapse ---
+        function setSidebarCollapsed(collapsed) {
+            sidebar.classList.toggle('collapsed', collapsed);
+            toggleIcon.innerHTML = collapsed ? '&#9654;' : '&#9664;';
+            toggleBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+            localStorage.setItem('jredux-sidebar-collapsed', collapsed ? '1' : '');
+        }
+        toggleBtn.addEventListener('click', () => {
+            setSidebarCollapsed(!sidebar.classList.contains('collapsed'));
+        });
+        if (localStorage.getItem('jredux-sidebar-collapsed') === '1') {
+            setSidebarCollapsed(true);
+        }
 
         // =====================================================================
         //  LOAD ENVIRONMENT
