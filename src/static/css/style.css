@@ -430,10 +430,9 @@ html, body {
 
 /* === Build Log === */
 .build-log {
-    max-width: 1200px;
     width: 100%;
-    margin: 16px auto;
-    padding: 0 16px;
+    padding: 0;
+    flex-shrink: 0;
 }
 
 .build-log-header {
@@ -1008,9 +1007,7 @@ input:focus-visible {
 .env-layout {
     display: flex;
     gap: 0;
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 16px 24px;
+    padding: 0;
     height: calc(100vh - 60px);
 }
 
@@ -1019,8 +1016,7 @@ input:focus-visible {
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border-default);
-    border-radius: 8px 0 0 8px;
+    border-right: 1px solid var(--border-default);
     background: var(--bg-secondary);
     overflow-y: auto;
     overflow-x: hidden;
@@ -1079,9 +1075,6 @@ input:focus-visible {
 .env-main {
     flex: 1;
     min-width: 0;
-    border: 1px solid var(--border-default);
-    border-left: none;
-    border-radius: 0 8px 8px 0;
     background: var(--bg-primary);
     display: flex;
     flex-direction: column;
