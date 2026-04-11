@@ -219,6 +219,22 @@ def execute_shell(conn: socket.socket, command: str) -> None:
         })
 
 
+FILES_DIR = "/env/files"
+REPOS_DIR = "/env/repos"
+
+
+def _invalidate_user_modules() -> None:
+    """Remove cached modules from /env/files and /env/repos so
+    re-imports pick up the latest source from disk."""
+    to_remove = []
+    for name, mod in sys.modules.items():
+        path = getattr(mod, "__file__", None)
+        if path and (path.startswith(FILES_DIR) or path.startswith(REPOS_DIR)):
+            to_remove.append(name)
+    for name in to_remove:
+        del sys.modules[name]
+
+
 def execute_code(
     conn: socket.socket, code: str, notebook_id: str = "",
 ) -> None:
@@ -226,6 +242,7 @@ def execute_code(
     _current_conn = conn
     ns = _get_namespace(notebook_id)
     ns["display_audio"] = display_audio
+    _invalidate_user_modules()
 
     old_stdout = sys.stdout
     old_stderr = sys.stderr
