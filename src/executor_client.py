@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 CONNECT_TIMEOUT = 10
 CONNECT_RETRIES = 5
 CONNECT_RETRY_DELAY = 1.0
+# 16MB line limit — display_audio sends base64-encoded files as single JSON lines
+STREAM_LIMIT = 16 * 1024 * 1024
 
 
 class ExecutorClient:
@@ -25,7 +27,9 @@ class ExecutorClient:
         for attempt in range(CONNECT_RETRIES):
             try:
                 self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port),
+                    asyncio.open_connection(
+                        self.host, self.port, limit=STREAM_LIMIT,
+                    ),
                     timeout=CONNECT_TIMEOUT,
                 )
                 return
