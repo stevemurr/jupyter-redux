@@ -627,12 +627,19 @@
             editorWrap.className = 'cell-editor';
             el.appendChild(editorWrap);
 
-            // Output
+            // Output (collapsible)
             const outputWrap = document.createElement('div');
-            outputWrap.className = 'cell-output-wrapper';
+            outputWrap.className = 'cell-output-wrapper collapsed';
             outputWrap.style.display = 'none';
+
+            const outputToggle = document.createElement('button');
+            outputToggle.className = 'output-toggle';
+            outputToggle.setAttribute('aria-label', 'Toggle output');
+
             const outputEl = document.createElement('div');
             outputEl.className = 'cell-output';
+
+            outputWrap.appendChild(outputToggle);
             outputWrap.appendChild(outputEl);
             el.appendChild(outputWrap);
 
@@ -659,7 +666,13 @@
                 parent: editorWrap,
             });
 
-            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, execCountEl: header.querySelector('.cell-exec-count') };
+            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, outputToggle, execCountEl: header.querySelector('.cell-exec-count') };
+
+            outputToggle.addEventListener('click', (e) => {
+                e.stopPropagation();
+                outputWrap.classList.toggle('collapsed');
+                updateOutputToggle(cellInfo);
+            });
             tab.cells.set(cellId, cellInfo);
             tab.cellOrder.push(cellId);
 
@@ -755,12 +768,29 @@
                         div.appendChild(pre);
                     }
                     cell.outputEl.appendChild(div);
-                    cell.outputWrap.style.display = 'block';
+                    showCellOutput(cell);
                 }
             });
 
             tab.ws = ws;
             ws.connect();
+        }
+
+        function updateOutputToggle(cell) {
+            const collapsed = cell.outputWrap.classList.contains('collapsed');
+            const lines = (cell.outputEl.textContent || '').split('\n').filter(l => l.trim()).length;
+            if (collapsed) {
+                cell.outputToggle.innerHTML = `<span class="toggle-icon">&#9654;</span> Output <span class="toggle-hint">${lines} line${lines !== 1 ? 's' : ''} — click to expand</span>`;
+            } else {
+                cell.outputToggle.innerHTML = `<span class="toggle-icon">&#9660;</span> Output <span class="toggle-hint">click to collapse</span>`;
+            }
+        }
+
+        function showCellOutput(cell) {
+            if (cell.outputEl.children.length > 0 || cell.outputEl.textContent.trim()) {
+                cell.outputWrap.style.display = 'block';
+                updateOutputToggle(cell);
+            }
         }
 
         function appendCellOutput(cell, type, content) {
@@ -774,7 +804,7 @@
                 pre.textContent = content;
                 cell.outputEl.appendChild(pre);
             }
-            cell.outputWrap.style.display = 'block';
+            showCellOutput(cell);
         }
 
         function executeCell(tab, cellId) {
@@ -783,6 +813,7 @@
             if (!cell) return;
             cell.outputEl.innerHTML = '';
             cell.outputWrap.style.display = 'none';
+            cell.outputWrap.classList.add('collapsed');
             const source = cell.editor.state.doc.toString();
             tab.ws.execute(cellId, source);
         }
