@@ -144,6 +144,11 @@ async def _setup_connection(
             return None, ""
 
     # Start container (image now exists)
+    await send_json(ws, {
+        "type": "container_state",
+        "status": "starting",
+        "message": f"Starting container (image {tag})...",
+    })
     state = container_service.start_container(
         environment_id,
         python_version=env.python_version,

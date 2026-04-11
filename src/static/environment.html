@@ -726,16 +726,24 @@
         //  NOTEBOOK EXECUTION (WebSocket)
         // =====================================================================
         const buildLogEl = document.getElementById('build-log');
+        const buildLogTitle = buildLogEl.querySelector('.build-log-title');
         const buildLogContent = document.getElementById('build-log-content');
 
-        function showBuildLog(show) {
+        function showBuildLog(show, title) {
             buildLogEl.style.display = show ? 'block' : 'none';
-            if (show) buildLogContent.textContent = '';
+            if (show) {
+                buildLogTitle.textContent = title || 'Building container image...';
+                buildLogContent.textContent = '';
+            }
         }
 
-        function appendBuildLog(lines) {
-            for (const line of lines) {
-                buildLogContent.textContent += line + '\n';
+        function appendBuildLog(text) {
+            if (typeof text === 'string') {
+                buildLogContent.textContent += text + '\n';
+            } else {
+                for (const line of text) {
+                    buildLogContent.textContent += line + '\n';
+                }
             }
             buildLogContent.scrollTop = buildLogContent.scrollHeight;
         }
@@ -746,9 +754,15 @@
             ws.on('container_state', (msg) => {
                 updateContainerBadge(msg.status, msg.message);
                 if (msg.status === 'building') {
-                    showBuildLog(true);
-                } else if (msg.status === 'ready' || msg.status === 'error') {
-                    showBuildLog(false);
+                    showBuildLog(true, 'Building container image...');
+                } else if (msg.status === 'starting') {
+                    showBuildLog(true, 'Starting container...');
+                    if (msg.message) appendBuildLog(msg.message);
+                } else if (msg.status === 'ready') {
+                    appendBuildLog('Container ready.');
+                    setTimeout(() => showBuildLog(false), 1000);
+                } else if (msg.status === 'error') {
+                    appendBuildLog('Error: ' + (msg.message || 'unknown'));
                 }
             });
 
