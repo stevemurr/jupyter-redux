@@ -215,10 +215,16 @@
                 ${data.gpu ? '<span class="card-badge gpu">GPU</span>' : ''}
             `;
             if (data.container_state) updateContainerBadge(data.container_state.status);
-            renderNotebooks(data.notebooks || []);
+            const notebooks = data.notebooks || [];
+            renderNotebooks(notebooks);
             if (data.container_state && data.container_state.status === 'ready') {
                 loadFileTree();
                 loadRepos();
+            }
+
+            // Auto-open first notebook if none are open yet
+            if (notebooks.length > 0 && openTabs.size === 0) {
+                openNotebookTab(notebooks[0].id, notebooks[0].name);
             }
         }
 
@@ -761,6 +767,8 @@
                 } else if (msg.status === 'ready') {
                     appendBuildLog('Container ready.');
                     setTimeout(() => showBuildLog(false), 1000);
+                    loadFileTree();
+                    loadRepos();
                 } else if (msg.status === 'error') {
                     appendBuildLog('Error: ' + (msg.message || 'unknown'));
                 }

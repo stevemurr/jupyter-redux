@@ -151,7 +151,11 @@ async def create_environment(req: CreateEnvironmentRequest) -> EnvironmentRespon
     env = svc.create_environment(
         name, python_version=req.python_version, gpu=req.gpu
     )
-    return _build_env_response(env)
+
+    # Auto-create a first notebook so the user has something to open
+    svc.create_notebook(env.id, "Notebook 1")
+    notebooks = svc.list_notebooks(env.id)
+    return _build_env_response(env, notebooks.notebooks)
 
 
 @app.get("/api/environments/{env_id}", response_model=EnvironmentResponse)
