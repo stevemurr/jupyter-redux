@@ -784,6 +784,106 @@ html, body {
     opacity: 1;
 }
 
+/* === Monitor Display === */
+.output-monitor {
+    padding: 12px;
+    background: var(--bg-output);
+    border-radius: 4px;
+}
+
+.monitor-title {
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--accent-cyan);
+    margin-bottom: 8px;
+}
+
+.monitor-canvas {
+    width: 100%;
+    height: auto;
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    display: block;
+}
+
+.monitor-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 6px 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.monitor-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.legend-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 3px;
+    border-radius: 1px;
+}
+
+.monitor-metrics {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    padding: 6px 0;
+}
+
+.monitor-metrics-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 6px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+}
+
+.metric-key { color: var(--text-muted); }
+.metric-val { color: var(--text-primary); font-weight: 500; }
+
+.monitor-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+}
+
+.monitor-progress-track {
+    flex: 1;
+    height: 4px;
+    background: var(--bg-tertiary);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.monitor-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent-blue);
+    border-radius: 2px;
+    transition: width 0.2s;
+}
+
+.monitor-progress-text {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.monitor-done .monitor-title::after {
+    content: '  done';
+    color: var(--accent-green);
+}
+
 /* === Setup Cell (pip install) === */
 .cell.setup-cell .cell-header {
     background: rgba(187, 154, 247, 0.1);

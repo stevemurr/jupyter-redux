@@ -295,14 +295,12 @@ async def _process_executor_msg(
             content=msg.get("data", ""),
         ))
     elif msg_type == "display":
-        await send_json(ws, {
-            "type": "display",
-            "cell_id": cell_id,
-            "display_type": msg.get("display_type", ""),
-            "mime": msg.get("mime", ""),
-            "data": msg.get("data", ""),
-            "filename": msg.get("filename", ""),
-        })
+        # Forward all executor fields plus cell_id
+        fwd = {"type": "display", "cell_id": cell_id}
+        for k, v in msg.items():
+            if k != "type":
+                fwd[k] = v
+        await send_json(ws, fwd)
     elif msg_type == "error":
         await send_json(ws, {
             "type": "error",

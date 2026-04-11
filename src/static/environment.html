@@ -679,7 +679,7 @@
                 parent: editorWrap,
             });
 
-            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, outputToggle, execCountEl: header.querySelector('.cell-exec-count') };
+            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, outputToggle, execCountEl: header.querySelector('.cell-exec-count'), monitors: {} };
 
             outputToggle.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -810,7 +810,7 @@
 
             ws.on('display', (msg) => {
                 const cell = tab.cells.get(msg.cell_id);
-                if (cell) appendCellDisplay(cell, msg.display_type, msg.data, msg.mime, msg.filename);
+                if (cell) appendCellDisplay(cell, msg);
             });
 
             ws.on('error', (msg) => {
@@ -865,10 +865,15 @@
             showCellOutput(cell);
         }
 
-        function appendCellDisplay(cell, displayType, data, mime, filename) {
-            if (displayType === 'audio' && data) {
-                const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
-                const blob = new Blob([bytes], { type: mime });
+        function appendCellDisplay(cell, msg) {
+            const dt = msg.display_type;
+            if (dt === 'monitor') {
+                handleMonitorMessage(cell, msg);
+                return;
+            }
+            if (dt === 'audio' && msg.data) {
+                const bytes = Uint8Array.from(atob(msg.data), c => c.charCodeAt(0));
+                const blob = new Blob([bytes], { type: msg.mime });
                 const url = URL.createObjectURL(blob);
 
                 const wrapper = document.createElement('div');
@@ -876,7 +881,7 @@
 
                 const label = document.createElement('span');
                 label.className = 'audio-filename';
-                label.textContent = filename || 'audio';
+                label.textContent = msg.filename || 'audio';
                 wrapper.appendChild(label);
 
                 const audio = document.createElement('audio');
@@ -890,11 +895,196 @@
             showCellOutput(cell);
         }
 
+        // --- Monitor rendering ---
+        const MONITOR_COLORS = ['#7aa2f7','#9ece6a','#e0af68','#bb9af7','#7dcfff','#f7768e'];
+
+        function handleMonitorMessage(cell, msg) {
+            const did = msg.display_id;
+            const action = msg.action;
+
+            if (action === 'init') {
+                const container = document.createElement('div');
+                container.className = 'output-display output-monitor';
+
+                const title = document.createElement('div');
+                title.className = 'monitor-title';
+                title.textContent = (msg.config && msg.config.title) || 'Monitor';
+                container.appendChild(title);
+
+                const canvas = document.createElement('canvas');
+                canvas.className = 'monitor-canvas';
+                canvas.height = 200;
+                container.appendChild(canvas);
+
+                const legend = document.createElement('div');
+                legend.className = 'monitor-legend';
+                container.appendChild(legend);
+
+                const table = document.createElement('div');
+                table.className = 'monitor-metrics';
+                container.appendChild(table);
+
+                let progressEl = null;
+                if (msg.config && msg.config.total_steps) {
+                    progressEl = document.createElement('div');
+                    progressEl.className = 'monitor-progress';
+                    progressEl.innerHTML = '<div class="monitor-progress-track"><div class="monitor-progress-bar"></div></div><span class="monitor-progress-text"></span>';
+                    container.appendChild(progressEl);
+                }
+
+                cell.outputEl.appendChild(container);
+                showCellOutput(cell);
+
+                // Size canvas to container after it's in the DOM
+                requestAnimationFrame(() => {
+                    const w = container.clientWidth - 24;
+                    canvas.width = Math.max(300, w) * (window.devicePixelRatio || 1);
+                    canvas.style.width = Math.max(300, w) + 'px';
+                });
+
+                cell.monitors[did] = {
+                    container, canvas, ctx: canvas.getContext('2d'),
+                    legend, table, progressEl,
+                    series: {}, keyOrder: [],
+                    config: msg.config || {}, lastStep: 0,
+                };
+            }
+            else if (action === 'update') {
+                const mon = cell.monitors[did];
+                if (!mon) return;
+                const step = msg.step;
+                const metrics = msg.metrics || {};
+
+                for (const [key, value] of Object.entries(metrics)) {
+                    if (!mon.series[key]) {
+                        mon.series[key] = [];
+                        mon.keyOrder.push(key);
+                    }
+                    mon.series[key].push({ step, value });
+                }
+                mon.lastStep = step;
+
+                drawMonitorChart(mon);
+                updateMonitorTable(mon, metrics, step);
+
+                if (mon.progressEl && mon.config.total_steps) {
+                    const pct = Math.min(100, ((step + 1) / mon.config.total_steps) * 100);
+                    mon.progressEl.querySelector('.monitor-progress-bar').style.width = pct + '%';
+                    mon.progressEl.querySelector('.monitor-progress-text').textContent =
+                        `${step + 1} / ${mon.config.total_steps} (${pct.toFixed(1)}%)`;
+                }
+                showCellOutput(cell);
+            }
+            else if (action === 'done') {
+                const mon = cell.monitors[did];
+                if (mon) mon.container.classList.add('monitor-done');
+            }
+        }
+
+        function drawMonitorChart(mon) {
+            const { canvas, ctx, series, keyOrder } = mon;
+            const dpr = window.devicePixelRatio || 1;
+            const W = canvas.width, H = canvas.height;
+            const pad = { top: 10*dpr, right: 15*dpr, bottom: 30*dpr, left: 55*dpr };
+            const plotW = W - pad.left - pad.right;
+            const plotH = H - pad.top - pad.bottom;
+
+            ctx.clearRect(0, 0, W, H);
+            ctx.fillStyle = '#16171f';
+            ctx.fillRect(0, 0, W, H);
+
+            if (keyOrder.length === 0) return;
+
+            let xMin = Infinity, xMax = -Infinity;
+            let yMin = Infinity, yMax = -Infinity;
+            for (const key of keyOrder) {
+                for (const pt of series[key]) {
+                    if (pt.step < xMin) xMin = pt.step;
+                    if (pt.step > xMax) xMax = pt.step;
+                    if (pt.value < yMin) yMin = pt.value;
+                    if (pt.value > yMax) yMax = pt.value;
+                }
+            }
+            if (xMin === xMax) xMax = xMin + 1;
+            if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
+            const yPad = (yMax - yMin) * 0.05;
+            yMin -= yPad; yMax += yPad;
+
+            const xS = (v) => pad.left + ((v - xMin) / (xMax - xMin)) * plotW;
+            const yS = (v) => pad.top + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+            // Grid
+            ctx.strokeStyle = '#2f3347';
+            ctx.lineWidth = 0.5 * dpr;
+            const yTicks = 5;
+            const fs = 10 * dpr;
+            ctx.font = `${fs}px monospace`;
+            for (let i = 0; i <= yTicks; i++) {
+                const y = pad.top + (plotH / yTicks) * i;
+                ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+                const val = yMax - ((yMax - yMin) / yTicks) * i;
+                ctx.fillStyle = '#565f89';
+                ctx.textAlign = 'right';
+                ctx.fillText(fmtAxis(val), pad.left - 5*dpr, y + 3*dpr);
+            }
+            ctx.textAlign = 'center';
+            const xTicks = Math.min(6, Math.max(1, xMax - xMin));
+            for (let i = 0; i <= xTicks; i++) {
+                const step = Math.round(xMin + ((xMax - xMin) / xTicks) * i);
+                ctx.fillStyle = '#565f89';
+                ctx.fillText(step, xS(step), H - pad.bottom + 15*dpr);
+            }
+
+            // Series lines
+            for (let ki = 0; ki < keyOrder.length; ki++) {
+                const pts = series[keyOrder[ki]];
+                if (pts.length === 0) continue;
+                ctx.strokeStyle = MONITOR_COLORS[ki % MONITOR_COLORS.length];
+                ctx.lineWidth = 1.5 * dpr;
+                ctx.beginPath();
+                ctx.moveTo(xS(pts[0].step), yS(pts[0].value));
+                for (let i = 1; i < pts.length; i++) {
+                    ctx.lineTo(xS(pts[i].step), yS(pts[i].value));
+                }
+                ctx.stroke();
+            }
+
+            // Legend
+            mon.legend.innerHTML = '';
+            for (let i = 0; i < keyOrder.length; i++) {
+                const item = document.createElement('span');
+                item.className = 'monitor-legend-item';
+                item.innerHTML = `<span class="legend-swatch" style="background:${MONITOR_COLORS[i % MONITOR_COLORS.length]}"></span>${escapeHtml(keyOrder[i])}`;
+                mon.legend.appendChild(item);
+            }
+        }
+
+        function fmtAxis(v) {
+            if (Math.abs(v) >= 1000) return v.toExponential(1);
+            if (Math.abs(v) < 0.001 && v !== 0) return v.toExponential(1);
+            return Number(v.toPrecision(3)).toString();
+        }
+
+        function updateMonitorTable(mon, metrics, step) {
+            mon.table.innerHTML = '';
+            const add = (k, v) => {
+                const row = document.createElement('div');
+                row.className = 'monitor-metrics-row';
+                row.innerHTML = `<span class="metric-key">${escapeHtml(k)}</span><span class="metric-val">${v}</span>`;
+                mon.table.appendChild(row);
+            };
+            add('step', step);
+            for (const [k, v] of Object.entries(metrics)) {
+                add(k, typeof v === 'number' ? Number(v.toPrecision(4)) : v);
+            }
+        }
+
         function executeCell(tab, cellId) {
             if (!tab.ws) return;
             const cell = tab.cells.get(cellId);
             if (!cell) return;
             cell.outputEl.innerHTML = '';
+            cell.monitors = {};
             cell.outputWrap.style.display = 'none';
             cell.outputWrap.classList.add('collapsed');
             const source = cell.editor.state.doc.toString();

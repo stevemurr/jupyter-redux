@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
 
 HOST = "0.0.0.0"
@@ -254,6 +255,219 @@ def _invalidate_user_modules() -> None:
         del sys.modules[name]
 
 
+# ---------------------------------------------------------------------------
+#  Monitor — real-time training metrics
+# ---------------------------------------------------------------------------
+
+class Monitor:
+    """Live training monitor that streams metrics to the notebook UI.
+
+    Usage (explicit):
+        mon = Monitor(title="Training", total_steps=100)
+        for epoch in range(100):
+            loss = train_step(...)
+            mon.log(epoch=epoch, loss=loss)
+        mon.done()
+
+    Usage (wrap):
+        mon = Monitor()
+        with mon.wrap():
+            train_vae(loader)  # stdout parsed for numeric patterns
+    """
+
+    _counter = 0
+    _THROTTLE_INTERVAL = 0.05  # 50ms = max 20 updates/sec
+
+    def __init__(self, title="Training Monitor", total_steps=None):
+        Monitor._counter += 1
+        self._display_id = f"mon_{Monitor._counter}_{id(self):x}"
+        self._title = title
+        self._total_steps = total_steps
+        self._step = 0
+        self._keys: list[str] = []
+        self._last_send = 0.0
+        self._pending: dict | None = None
+        self._pending_step: int | None = None
+        self._send_init()
+
+    def _send(self, msg: dict) -> None:
+        conn = _current_conn
+        if conn is None:
+            return
+        send_message(conn, msg)
+
+    def _send_init(self) -> None:
+        self._send({
+            "type": "display",
+            "display_type": "monitor",
+            "display_id": self._display_id,
+            "action": "init",
+            "config": {
+                "title": self._title,
+                "total_steps": self._total_steps,
+            },
+        })
+
+    def log(self, step=None, **metrics):
+        """Log metrics for one step. Auto-increments step if omitted."""
+        if step is None:
+            step = self._step
+            self._step += 1
+        else:
+            self._step = step + 1
+
+        for k in metrics:
+            if k not in self._keys:
+                self._keys.append(k)
+
+        now = time.time()
+        if now - self._last_send < self._THROTTLE_INTERVAL:
+            self._pending = metrics
+            self._pending_step = step
+            return
+        self._last_send = now
+        self._send_update(step, metrics)
+
+    def _send_update(self, step, metrics):
+        self._send({
+            "type": "display",
+            "display_type": "monitor",
+            "display_id": self._display_id,
+            "action": "update",
+            "step": step,
+            "metrics": metrics,
+            "ts": time.time(),
+        })
+
+    def _flush_pending(self):
+        if self._pending is not None:
+            self._send_update(self._pending_step, self._pending)
+            self._pending = None
+            self._pending_step = None
+
+    def done(self):
+        """Mark monitoring as complete. Flushes any pending data."""
+        self._flush_pending()
+        self._send({
+            "type": "display",
+            "display_type": "monitor",
+            "display_id": self._display_id,
+            "action": "done",
+        })
+
+    def wrap(self, patterns=None):
+        """Context manager that captures stdout and auto-logs metrics.
+
+        Args:
+            patterns: Optional list of regex strings with named groups
+                      to extract metrics from printed output.
+        """
+        return _MonitorWrapContext(self, patterns)
+
+
+class _MonitorWrapContext:
+    """Context manager that intercepts stdout and parses numeric patterns."""
+
+    def __init__(self, monitor, patterns=None):
+        self._monitor = monitor
+        self._custom_patterns = patterns or []
+        self._old_stdout = None
+
+    def __enter__(self):
+        self._old_stdout = sys.stdout
+        sys.stdout = _MonitorTeeWriter(
+            sys.stdout,
+            self._monitor,
+            self._custom_patterns,
+        )
+        return self._monitor
+
+    def __exit__(self, *exc):
+        sys.stdout = self._old_stdout
+        self._monitor._flush_pending()
+        return False
+
+
+_NUMERIC_RE = re.compile(
+    r"(\b[a-zA-Z_][\w]*)\s*[:=]\s*"
+    r"([+-]?\d+\.?\d*(?:[eE][+-]?\d+)?)"
+)
+_STEP_RE = re.compile(
+    r"(?:epoch|step|iter(?:ation)?)\s*[:=]?\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+class _MonitorTeeWriter:
+    """Wraps stdout: forwards all output AND parses lines for metrics."""
+
+    def __init__(self, underlying, monitor, custom_patterns):
+        self._underlying = underlying
+        self._monitor = monitor
+        self._custom = [
+            re.compile(p) if isinstance(p, str) else p
+            for p in custom_patterns
+        ]
+        self._buf = ""
+
+    def write(self, text: str) -> int:
+        self._underlying.write(text)
+        self._buf += text
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._parse_line(line)
+        return len(text)
+
+    def _parse_line(self, line: str) -> None:
+        step, metrics = _extract_metrics(line, self._custom)
+        if metrics:
+            self._monitor.log(step=step, **metrics)
+
+
+_STEP_KEYS = {"epoch", "step", "iter", "iteration"}
+
+
+def _apply_custom_patterns(line, custom_patterns, metrics):
+    """Apply user-provided regex patterns to extract named groups."""
+    for pat in custom_patterns:
+        m = pat.search(line)
+        if m:
+            for k, v in m.groupdict().items():
+                try:
+                    metrics[k] = float(v)
+                except (ValueError, TypeError):
+                    pass
+
+
+def _extract_metrics(line, custom_patterns):
+    """Parse a line for step and numeric key=value pairs."""
+    metrics: dict = {}
+    step = None
+
+    m = _STEP_RE.search(line)
+    if m:
+        step = int(m.group(1))
+
+    for key, val in _NUMERIC_RE.findall(line):
+        if key.lower() in _STEP_KEYS:
+            if step is None:
+                step = int(float(val))
+            continue
+        try:
+            metrics[key] = float(val)
+        except ValueError:
+            pass
+
+    _apply_custom_patterns(line, custom_patterns, metrics)
+    return step, metrics
+
+    def flush(self) -> None:
+        self._underlying.flush()
+
+    def fileno(self) -> int:
+        raise OSError("_MonitorTeeWriter has no fileno")
+
+
 def execute_code(
     conn: socket.socket, code: str, notebook_id: str = "",
 ) -> None:
@@ -261,6 +475,7 @@ def execute_code(
     _current_conn = conn
     ns = _get_namespace(notebook_id)
     ns["display_audio"] = display_audio
+    ns["Monitor"] = Monitor
     _invalidate_user_modules()
 
     old_stdout = sys.stdout
