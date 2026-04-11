@@ -170,3 +170,36 @@ class ContainerStateResponse(BaseModel):
     status: ContainerStatus
     container_id: str | None = None
     error_message: str | None = None
+
+
+# --- File operations ---
+
+
+class FileEntry(BaseModel):
+    name: str
+    path: str
+    type: str  # "file" or "directory"
+    size: int | None = None
+
+
+class FileTreeResponse(BaseModel):
+    entries: list[FileEntry]
+
+
+class FileContentResponse(BaseModel):
+    path: str
+    content: str
+
+
+class WriteFileRequest(BaseModel):
+    path: str
+    content: str
+
+
+class MkdirRequest(BaseModel):
+    path: str
+
+
+class RenameFileRequest(BaseModel):
+    old_path: str
+    new_path: str

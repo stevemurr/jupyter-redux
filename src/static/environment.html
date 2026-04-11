@@ -5,6 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Environment - Jupyter Redux</title>
     <link rel="stylesheet" href="/static/css/style.css">
+
+    <!-- CodeMirror 6 for file editor -->
+    <script type="module">
+        import {
+            EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
+            EditorState, defaultKeymap, python,
+            syntaxHighlighting, defaultHighlightStyle, oneDark
+        } from '/static/js/cm-bundle.js';
+
+        window.EditorView = EditorView;
+        window.EditorState = EditorState;
+        window.keymap = keymap;
+        window.defaultKeymap = defaultKeymap;
+        window.python = python;
+        window.lineNumbers = lineNumbers;
+        window.highlightActiveLine = highlightActiveLine;
+        window.highlightActiveLineGutter = highlightActiveLineGutter;
+        window.syntaxHighlighting = syntaxHighlighting;
+        window.defaultHighlightStyle = defaultHighlightStyle;
+        window.oneDark = oneDark;
+
+        window.dispatchEvent(new Event('codemirror-ready'));
+    </script>
 </head>
 <body>
     <header class="app-header">
@@ -19,17 +42,48 @@
         </div>
     </header>
 
-    <main class="notebook-list-container">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-            <h2 style="margin:0;color:var(--text-primary);">Notebooks</h2>
-            <button id="new-notebook-btn" class="btn btn-primary" aria-label="Create new notebook">
-                + New Notebook
-            </button>
+    <div class="env-layout">
+        <!-- File tree sidebar -->
+        <div class="env-sidebar">
+            <div class="sidebar-header">
+                <h3>Files</h3>
+                <div class="sidebar-actions">
+                    <button id="btn-new-file" title="New file">+ File</button>
+                    <button id="btn-new-dir" title="New folder">+ Dir</button>
+                    <button id="btn-refresh-files" title="Refresh">&#8635;</button>
+                </div>
+            </div>
+            <div class="file-tree" id="file-tree">
+                <div class="file-tree-empty" id="file-tree-empty">
+                    Container not running.<br>Open a notebook to start.
+                </div>
+            </div>
+
+            <!-- Notebooks list in sidebar -->
+            <div class="sidebar-header" style="margin-top:auto;">
+                <h3>Notebooks</h3>
+                <div class="sidebar-actions">
+                    <button id="new-notebook-btn" title="New notebook">+ New</button>
+                </div>
+            </div>
+            <div id="notebook-list" style="padding:4px 0;overflow-y:auto;max-height:200px;">
+            </div>
         </div>
-        <div id="notebook-list" class="notebook-list" role="list" aria-label="Notebooks">
-            <p class="empty-state" id="empty-state">No notebooks yet. Create one to get started.</p>
+
+        <!-- File editor main area -->
+        <div class="env-main">
+            <div class="editor-tabs" id="editor-tabs"></div>
+            <div class="file-editor-area" id="file-editor-area">
+                <div class="file-editor-placeholder" id="editor-placeholder">
+                    Select a file to edit, or create a new one.
+                </div>
+            </div>
+            <div class="file-editor-status" id="editor-status">
+                <span id="status-path"></span>
+                <span id="status-save"></span>
+            </div>
         </div>
-    </main>
+    </div>
 
     <!-- New notebook dialog -->
     <div class="dialog-overlay" id="new-notebook-dialog" style="display:none;">
@@ -46,125 +100,377 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js?v=4"></script>
+    <script src="/static/js/app.js?v=5"></script>
     <script>
+    (function() {
         const envId = window.location.pathname.split('/').filter(Boolean)[1];
-        const listEl = document.getElementById('notebook-list');
+        let envData = null;
+        let openFiles = new Map(); // path -> { content, editor, modified }
+        let activeFilePath = null;
+
         const titleInput = document.getElementById('env-title');
         const badgesEl = document.getElementById('env-badges');
         const containerBadge = document.getElementById('container-badge');
-        const newBtn = document.getElementById('new-notebook-btn');
+        const fileTree = document.getElementById('file-tree');
+        const fileTreeEmpty = document.getElementById('file-tree-empty');
+        const editorTabs = document.getElementById('editor-tabs');
+        const editorArea = document.getElementById('file-editor-area');
+        const editorPlaceholder = document.getElementById('editor-placeholder');
+        const statusPath = document.getElementById('status-path');
+        const statusSave = document.getElementById('status-save');
+        const notebookList = document.getElementById('notebook-list');
 
-        let envData = null;
-
+        // --- Load environment ---
         async function loadEnvironment() {
             const data = await api.get(`/api/environments/${envId}`);
-            if (!data) {
-                document.querySelector('main').innerHTML = '<p class="empty-state">Environment not found.</p>';
-                return;
-            }
+            if (!data) return;
             envData = data;
             titleInput.value = data.name;
             document.title = `${data.name} - Jupyter Redux`;
-
-            // Badges
             badgesEl.innerHTML = `
                 <span class="card-badge python">Python ${data.python_version || '3.11'}</span>
                 ${data.gpu ? '<span class="card-badge gpu">GPU</span>' : ''}
             `;
-
-            // Container state
             if (data.container_state) {
                 updateContainerBadge(data.container_state.status);
             }
-
             renderNotebooks(data.notebooks || []);
-        }
-
-        function renderNotebooks(notebooks) {
-            listEl.innerHTML = '';
-            if (notebooks.length === 0) {
-                const msg = document.createElement('p');
-                msg.className = 'empty-state';
-                msg.textContent = 'No notebooks yet. Create one to get started.';
-                listEl.appendChild(msg);
-                return;
+            if (data.container_state && data.container_state.status === 'ready') {
+                loadFileTree();
             }
-            notebooks
-                .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
-                .forEach(nb => {
-                    const card = document.createElement('div');
-                    card.className = 'notebook-card';
-                    card.setAttribute('role', 'listitem');
-                    card.innerHTML = `
-                        <div class="notebook-card-info">
-                            <span class="notebook-name" data-id="${nb.id}">${escapeHtml(nb.name)}</span>
-                            <div class="notebook-card-badges">
-                                <span class="notebook-date">${new Date(nb.updated_at).toLocaleString()}</span>
-                            </div>
-                        </div>
-                        <div class="notebook-card-actions">
-                            <button class="btn btn-small btn-rename" data-id="${nb.id}" aria-label="Rename notebook">Rename</button>
-                            <button class="btn btn-small btn-danger btn-delete" data-id="${nb.id}" aria-label="Delete notebook">Delete</button>
-                        </div>
-                    `;
-                    card.querySelector('.notebook-card-info').addEventListener('click', () => {
-                        window.location.href = `/environment/${envId}/notebook/${nb.id}`;
-                    });
-                    card.querySelector('.btn-rename').addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        renameNotebook(nb.id, nb.name);
-                    });
-                    card.querySelector('.btn-delete').addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        deleteNotebook(nb.id, nb.name);
-                    });
-                    listEl.appendChild(card);
-                });
         }
 
         function updateContainerBadge(status, message) {
-            const dot = containerBadge.querySelector('.badge-dot');
-            const text = containerBadge.querySelector('.badge-text');
             containerBadge.className = `container-badge ${status}`;
+            const text = containerBadge.querySelector('.badge-text');
             const labels = {
-                none: 'No container',
-                building: message || 'Building image...',
-                starting: 'Starting...',
-                ready: 'Running',
-                stopping: 'Stopping...',
-                stopped: 'Stopped',
+                none: 'No container', building: message || 'Building...',
+                starting: 'Starting...', ready: 'Running',
+                stopping: 'Stopping...', stopped: 'Stopped',
                 error: message || 'Error',
             };
             text.textContent = labels[status] || status;
         }
 
-        async function renameNotebook(id, currentName) {
-            const newName = prompt('Rename notebook:', currentName);
-            if (newName && newName !== currentName) {
-                await api.put(`/api/notebooks/${id}`, { name: newName });
-                loadEnvironment();
+        // --- Notebooks ---
+        function renderNotebooks(notebooks) {
+            notebookList.innerHTML = '';
+            if (notebooks.length === 0) {
+                notebookList.innerHTML = '<div class="file-tree-empty" style="padding:12px;">No notebooks</div>';
+                return;
             }
+            notebooks
+                .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+                .forEach(nb => {
+                    const el = document.createElement('div');
+                    el.className = 'file-entry';
+                    el.innerHTML = `
+                        <span class="file-icon">&#128211;</span>
+                        <span class="file-name">${escapeHtml(nb.name)}</span>
+                        <div class="file-entry-actions">
+                            <button class="delete-btn" title="Delete">&#10005;</button>
+                        </div>
+                    `;
+                    el.addEventListener('click', (e) => {
+                        if (e.target.closest('.delete-btn')) {
+                            e.stopPropagation();
+                            deleteNotebook(nb.id, nb.name);
+                            return;
+                        }
+                        window.location.href = `/environment/${envId}/notebook/${nb.id}`;
+                    });
+                    notebookList.appendChild(el);
+                });
         }
 
         async function deleteNotebook(id, name) {
             if (!confirm(`Delete "${name}"?`)) return;
-            const card = listEl.querySelector(`[data-id="${id}"]`)?.closest('.notebook-card');
-            if (card) {
-                card.style.opacity = '0.5';
-                card.style.pointerEvents = 'none';
-            }
             await api.del(`/api/notebooks/${id}`);
             loadEnvironment();
         }
 
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+        // --- File tree ---
+        async function loadFileTree() {
+            const data = await api.get(`/api/environments/${envId}/files`);
+            if (!data || !data.entries) {
+                fileTreeEmpty.style.display = 'block';
+                fileTreeEmpty.textContent = 'No files yet. Create one to get started.';
+                return;
+            }
+            fileTreeEmpty.style.display = 'none';
+            renderFileTree(data.entries);
         }
 
-        // Rename environment on title change
+        function renderFileTree(entries) {
+            // Remove old entries but keep the empty message element
+            fileTree.querySelectorAll('.file-entry').forEach(el => el.remove());
+
+            if (entries.length === 0) {
+                fileTreeEmpty.style.display = 'block';
+                fileTreeEmpty.textContent = 'No files yet. Create one to get started.';
+                return;
+            }
+            fileTreeEmpty.style.display = 'none';
+
+            // Sort: dirs first, then files, alphabetical
+            const dirs = entries.filter(e => e.type === 'directory').sort((a, b) => a.path.localeCompare(b.path));
+            const files = entries.filter(e => e.type === 'file').sort((a, b) => a.path.localeCompare(b.path));
+
+            for (const entry of [...dirs, ...files]) {
+                const el = document.createElement('div');
+                el.className = `file-entry ${entry.type === 'directory' ? 'directory' : ''}`;
+                if (entry.path === activeFilePath) el.classList.add('active');
+
+                const depth = entry.path.split('/').length - 1;
+                const indent = depth * 12;
+                const icon = entry.type === 'directory' ? '&#128193;' : '&#128196;';
+                const sizeStr = entry.size != null ? formatSize(entry.size) : '';
+
+                el.innerHTML = `
+                    <span class="file-icon" style="margin-left:${indent}px">${icon}</span>
+                    <span class="file-name">${escapeHtml(entry.name)}</span>
+                    <span class="file-size">${sizeStr}</span>
+                    <div class="file-entry-actions">
+                        <button class="rename-btn" title="Rename">&#9998;</button>
+                        <button class="delete-btn" title="Delete">&#10005;</button>
+                    </div>
+                `;
+                el.addEventListener('click', (e) => {
+                    if (e.target.closest('.rename-btn')) {
+                        e.stopPropagation();
+                        renameFileEntry(entry);
+                        return;
+                    }
+                    if (e.target.closest('.delete-btn')) {
+                        e.stopPropagation();
+                        deleteFileEntry(entry);
+                        return;
+                    }
+                    if (entry.type === 'file') {
+                        openFile(entry.path);
+                    }
+                });
+                fileTree.appendChild(el);
+            }
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return `${bytes}B`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}K`;
+            return `${(bytes / 1024 / 1024).toFixed(1)}M`;
+        }
+
+        async function renameFileEntry(entry) {
+            const newName = prompt('Rename to:', entry.name);
+            if (!newName || newName === entry.name) return;
+            const parts = entry.path.split('/');
+            parts[parts.length - 1] = newName;
+            const newPath = parts.join('/');
+            await api.post(`/api/environments/${envId}/files/rename`, {
+                old_path: entry.path, new_path: newPath,
+            });
+            // Update open file tab if renamed
+            if (openFiles.has(entry.path)) {
+                const fileData = openFiles.get(entry.path);
+                openFiles.delete(entry.path);
+                openFiles.set(newPath, fileData);
+                if (activeFilePath === entry.path) activeFilePath = newPath;
+            }
+            loadFileTree();
+            renderTabs();
+        }
+
+        async function deleteFileEntry(entry) {
+            if (!confirm(`Delete "${entry.name}"?`)) return;
+            await api.del(`/api/environments/${envId}/files?path=${encodeURIComponent(entry.path)}`);
+            // Close tab if open
+            if (openFiles.has(entry.path)) {
+                closeFile(entry.path);
+            }
+            loadFileTree();
+        }
+
+        // --- File editor ---
+        async function openFile(path) {
+            if (!openFiles.has(path)) {
+                const data = await api.get(
+                    `/api/environments/${envId}/files/read?path=${encodeURIComponent(path)}`
+                );
+                if (!data) return;
+                openFiles.set(path, {
+                    content: data.content,
+                    savedContent: data.content,
+                    editor: null,
+                    modified: false,
+                });
+            }
+            activeFilePath = path;
+            renderTabs();
+            renderEditor();
+            // Update file tree selection
+            fileTree.querySelectorAll('.file-entry').forEach(el => el.classList.remove('active'));
+            statusPath.textContent = path;
+        }
+
+        function closeFile(path) {
+            const file = openFiles.get(path);
+            if (file && file.modified) {
+                if (!confirm(`"${path}" has unsaved changes. Close anyway?`)) return;
+            }
+            if (file && file.editor) {
+                file.editor.destroy();
+            }
+            openFiles.delete(path);
+            if (activeFilePath === path) {
+                const remaining = [...openFiles.keys()];
+                activeFilePath = remaining.length > 0 ? remaining[remaining.length - 1] : null;
+            }
+            renderTabs();
+            renderEditor();
+        }
+
+        function renderTabs() {
+            editorTabs.innerHTML = '';
+            for (const [path, file] of openFiles) {
+                const tab = document.createElement('div');
+                const name = path.split('/').pop();
+                tab.className = `editor-tab ${path === activeFilePath ? 'active' : ''} ${file.modified ? 'modified' : ''}`;
+                tab.innerHTML = `
+                    <span class="tab-name">${escapeHtml(name)}</span>
+                    <button class="tab-close" title="Close">&times;</button>
+                `;
+                tab.querySelector('.tab-name').addEventListener('click', () => {
+                    activeFilePath = path;
+                    renderTabs();
+                    renderEditor();
+                });
+                tab.querySelector('.tab-close').addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    closeFile(path);
+                });
+                editorTabs.appendChild(tab);
+            }
+        }
+
+        let currentEditor = null;
+
+        function renderEditor() {
+            // Hide/destroy current editor
+            if (currentEditor) {
+                currentEditor.dom.style.display = 'none';
+            }
+
+            if (!activeFilePath || !openFiles.has(activeFilePath)) {
+                editorPlaceholder.style.display = 'flex';
+                statusPath.textContent = '';
+                return;
+            }
+
+            editorPlaceholder.style.display = 'none';
+            statusPath.textContent = activeFilePath;
+            statusSave.textContent = '';
+
+            const file = openFiles.get(activeFilePath);
+
+            if (file.editor) {
+                file.editor.dom.style.display = 'block';
+                currentEditor = file.editor;
+                return;
+            }
+
+            // Wait for CodeMirror
+            if (!window.EditorView) {
+                window.addEventListener('codemirror-ready', () => renderEditor(), { once: true });
+                return;
+            }
+
+            const path = activeFilePath;
+            const isPython = path.endsWith('.py');
+
+            const extensions = [
+                lineNumbers(),
+                highlightActiveLine(),
+                highlightActiveLineGutter(),
+                EditorView.lineWrapping,
+                syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+                oneDark,
+                keymap.of([
+                    { key: 'Mod-s', run: () => { saveFile(path); return true; } },
+                    ...defaultKeymap,
+                ]),
+                EditorView.updateListener.of((update) => {
+                    if (update.docChanged) {
+                        const content = update.state.doc.toString();
+                        file.content = content;
+                        file.modified = content !== file.savedContent;
+                        renderTabs();
+                        scheduleSave(path);
+                    }
+                }),
+                ...(isPython ? [python()] : []),
+            ];
+
+            const editor = new EditorView({
+                state: EditorState.create({
+                    doc: file.content,
+                    extensions,
+                }),
+                parent: editorArea,
+            });
+
+            file.editor = editor;
+            currentEditor = editor;
+        }
+
+        let _saveTimers = {};
+        function scheduleSave(path) {
+            clearTimeout(_saveTimers[path]);
+            _saveTimers[path] = setTimeout(() => saveFile(path), 1000);
+        }
+
+        async function saveFile(path) {
+            const file = openFiles.get(path);
+            if (!file) return;
+            statusSave.textContent = 'Saving...';
+            const result = await api.put(`/api/environments/${envId}/files/write`, {
+                path, content: file.content,
+            });
+            if (result) {
+                file.savedContent = file.content;
+                file.modified = false;
+                statusSave.textContent = 'Saved';
+                renderTabs();
+                setTimeout(() => {
+                    if (statusSave.textContent === 'Saved') statusSave.textContent = '';
+                }, 2000);
+            } else {
+                statusSave.textContent = 'Save failed';
+            }
+        }
+
+        // --- Toolbar actions ---
+        document.getElementById('btn-new-file').addEventListener('click', async () => {
+            const name = prompt('File name (e.g. utils.py):');
+            if (!name) return;
+            await api.put(`/api/environments/${envId}/files/write`, {
+                path: name, content: '',
+            });
+            await loadFileTree();
+            openFile(name);
+        });
+
+        document.getElementById('btn-new-dir').addEventListener('click', async () => {
+            const name = prompt('Directory name:');
+            if (!name) return;
+            await api.post(`/api/environments/${envId}/files/mkdir`, { path: name });
+            loadFileTree();
+        });
+
+        document.getElementById('btn-refresh-files').addEventListener('click', () => {
+            loadFileTree();
+        });
+
+        // --- Rename environment ---
         titleInput.addEventListener('change', async () => {
             const newName = titleInput.value.trim();
             if (!newName || !envData || newName === envData.name) return;
@@ -180,22 +486,19 @@
             if (e.key === 'Enter') { e.preventDefault(); titleInput.blur(); }
         });
 
-        // New notebook dialog
+        // --- New notebook dialog ---
         const dialog = document.getElementById('new-notebook-dialog');
         const dialogName = document.getElementById('dialog-name');
         const dialogCreate = document.getElementById('dialog-create');
         const dialogCancel = document.getElementById('dialog-cancel');
 
-        newBtn.addEventListener('click', () => {
+        document.getElementById('new-notebook-btn').addEventListener('click', () => {
             dialogName.value = 'Untitled Notebook';
             dialog.style.display = 'flex';
             dialogName.select();
         });
 
-        dialogCancel.addEventListener('click', () => {
-            dialog.style.display = 'none';
-        });
-
+        dialogCancel.addEventListener('click', () => { dialog.style.display = 'none'; });
         dialog.addEventListener('click', (e) => {
             if (e.target === dialog) dialog.style.display = 'none';
         });
@@ -214,7 +517,14 @@
             }
         });
 
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
         loadEnvironment();
+    })();
     </script>
 </body>
 </html>

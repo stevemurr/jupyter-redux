@@ -14,11 +14,17 @@ from src.models import (
     CreateNotebookRequest,
     EnvironmentListResponse,
     EnvironmentResponse,
+    FileContentResponse,
+    FileEntry,
+    FileTreeResponse,
+    MkdirRequest,
     NotebookResponse,
+    RenameFileRequest,
     ReorderCellsRequest,
     UpdateCellRequest,
     UpdateEnvironmentRequest,
     UpdateNotebookRequest,
+    WriteFileRequest,
 )
 
 
@@ -233,6 +239,82 @@ async def container_status(env_id: str) -> ContainerStateResponse:
         container_id=state.container_id,
         error_message=state.error_message,
     )
+
+
+# --- File Operations ---
+
+
+def _require_running_env(env_id: str):
+    """Validate env exists and container is running."""
+    from src.models import ContainerStatus
+
+    svc = _get_env_service()
+    env = svc.get_environment(env_id)
+    if env is None:
+        raise HTTPException(404, "Environment not found")
+    csvc = _get_container_service()
+    state = csvc.get_container_status(env_id)
+    if state.status != ContainerStatus.READY:
+        raise HTTPException(
+            409,
+            "Container is not running. Start the environment first.",
+        )
+    return csvc
+
+
+@app.get(
+    "/api/environments/{env_id}/files",
+    response_model=FileTreeResponse,
+)
+async def list_files(env_id: str) -> FileTreeResponse:
+    csvc = _require_running_env(env_id)
+    entries = csvc.list_files(env_id)
+    return FileTreeResponse(
+        entries=[FileEntry(**e) for e in entries],
+    )
+
+
+@app.get(
+    "/api/environments/{env_id}/files/read",
+    response_model=FileContentResponse,
+)
+async def read_file(env_id: str, path: str) -> FileContentResponse:
+    csvc = _require_running_env(env_id)
+    content = csvc.read_file(env_id, path)
+    return FileContentResponse(path=path, content=content)
+
+
+@app.put("/api/environments/{env_id}/files/write")
+async def write_file(
+    env_id: str, req: WriteFileRequest,
+) -> FileContentResponse:
+    csvc = _require_running_env(env_id)
+    csvc.write_file(env_id, req.path, req.content)
+    return FileContentResponse(path=req.path, content=req.content)
+
+
+@app.delete("/api/environments/{env_id}/files", status_code=204)
+async def delete_file(env_id: str, path: str) -> None:
+    csvc = _require_running_env(env_id)
+    csvc.delete_file(env_id, path)
+
+
+@app.post("/api/environments/{env_id}/files/mkdir", status_code=201)
+async def make_directory(
+    env_id: str, req: MkdirRequest,
+) -> dict:
+    csvc = _require_running_env(env_id)
+    csvc.make_directory(env_id, req.path)
+    return {"path": req.path}
+
+
+@app.post("/api/environments/{env_id}/files/rename")
+async def rename_file(
+    env_id: str, req: RenameFileRequest,
+) -> dict:
+    csvc = _require_running_env(env_id)
+    csvc.rename_file(env_id, req.old_path, req.new_path)
+    return {"old_path": req.old_path, "new_path": req.new_path}
 
 
 # --- Notebook CRUD ---

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import logging
+import posixpath
+import tarfile
 import time
 
 import docker
@@ -12,6 +16,8 @@ import docker.types
 
 from src.config import settings
 from src.models import ContainerState, ContainerStatus
+
+FILES_ROOT = "/env/files"
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +256,129 @@ class ContainerService:
         if bindings and len(bindings) > 0:
             return int(bindings[0]["HostPort"])
         return None
+
+    # --- File operations (docker exec) ---
+
+    def _get_running_container(self, environment_id: str):
+        """Get a running container or raise."""
+        name = self.get_container_name(environment_id)
+        container = self.client.containers.get(name)
+        if container.status != "running":
+            raise RuntimeError("Container is not running")
+        return container
+
+    def _safe_path(self, rel_path: str) -> str:
+        """Resolve a relative path under FILES_ROOT, rejecting traversal."""
+        cleaned = posixpath.normpath(rel_path.strip("/"))
+        if cleaned == "." or not cleaned:
+            return FILES_ROOT
+        if cleaned.startswith("..") or "/../" in cleaned:
+            raise ValueError("Path traversal not allowed")
+        return f"{FILES_ROOT}/{cleaned}"
+
+    def list_files(self, environment_id: str) -> list[dict]:
+        """List the file tree under /env/files/ as JSON."""
+        container = self._get_running_container(environment_id)
+        script = (
+            "import os, json\n"
+            f"root = '{FILES_ROOT}'\n"
+            "os.makedirs(root, exist_ok=True)\n"
+            "entries = []\n"
+            "for dirpath, dirnames, filenames in os.walk(root):\n"
+            "    rel = os.path.relpath(dirpath, root)\n"
+            "    if rel == '.': rel = ''\n"
+            "    for d in sorted(dirnames):\n"
+            "        p = os.path.join(rel, d) if rel else d\n"
+            "        entries.append({'name': d, 'path': p,"
+            " 'type': 'directory'})\n"
+            "    for f in sorted(filenames):\n"
+            "        p = os.path.join(rel, f) if rel else f\n"
+            "        fp = os.path.join(dirpath, f)\n"
+            "        try:\n"
+            "            sz = os.path.getsize(fp)\n"
+            "        except OSError:\n"
+            "            sz = 0\n"
+            "        entries.append({'name': f, 'path': p,"
+            " 'type': 'file', 'size': sz})\n"
+            "print(json.dumps(entries))\n"
+        )
+        exit_code, output = container.exec_run(
+            ["python", "-c", script],
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"list_files failed: {output.decode(errors='replace')}"
+            )
+        return json.loads(output.decode())
+
+    def read_file(self, environment_id: str, path: str) -> str:
+        """Read a file from the container filesystem."""
+        container = self._get_running_container(environment_id)
+        full = self._safe_path(path)
+        exit_code, output = container.exec_run(["cat", full])
+        if exit_code != 0:
+            raise FileNotFoundError(
+                f"File not found: {path}"
+            )
+        return output.decode("utf-8", errors="replace")
+
+    def write_file(
+        self, environment_id: str, path: str, content: str,
+    ) -> None:
+        """Write a file into the container via tar archive."""
+        container = self._get_running_container(environment_id)
+        full = self._safe_path(path)
+
+        # Ensure parent directory exists
+        parent = posixpath.dirname(full)
+        container.exec_run(["mkdir", "-p", parent])
+
+        # Build tar in memory with the single file
+        data = content.encode("utf-8")
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=posixpath.basename(full))
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        buf.seek(0)
+        container.put_archive(parent, buf)
+
+    def delete_file(self, environment_id: str, path: str) -> None:
+        """Delete a file or directory from the container."""
+        container = self._get_running_container(environment_id)
+        full = self._safe_path(path)
+        if full == FILES_ROOT:
+            raise ValueError("Cannot delete the files root")
+        exit_code, output = container.exec_run(["rm", "-rf", full])
+        if exit_code != 0:
+            raise RuntimeError(
+                f"delete failed: {output.decode(errors='replace')}"
+            )
+
+    def make_directory(self, environment_id: str, path: str) -> None:
+        """Create a directory in the container."""
+        container = self._get_running_container(environment_id)
+        full = self._safe_path(path)
+        exit_code, output = container.exec_run(["mkdir", "-p", full])
+        if exit_code != 0:
+            raise RuntimeError(
+                f"mkdir failed: {output.decode(errors='replace')}"
+            )
+
+    def rename_file(
+        self, environment_id: str, old_path: str, new_path: str,
+    ) -> None:
+        """Rename/move a file or directory."""
+        container = self._get_running_container(environment_id)
+        old_full = self._safe_path(old_path)
+        new_full = self._safe_path(new_path)
+        exit_code, output = container.exec_run(
+            ["mv", old_full, new_full],
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"rename failed: {output.decode(errors='replace')}"
+            )
 
     def record_activity(self, environment_id: str) -> None:
         self._last_activity[environment_id] = time.time()
