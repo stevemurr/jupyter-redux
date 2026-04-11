@@ -223,9 +223,28 @@ FILES_DIR = "/env/files"
 REPOS_DIR = "/env/repos"
 
 
+def _refresh_pth_paths() -> None:
+    """Re-process .pth files from site-packages so editable installs
+    done after the executor started are visible on sys.path."""
+    import glob
+    import site
+
+    for sp_dir in site.getsitepackages():
+        for pth in glob.glob(os.path.join(sp_dir, "*.pth")):
+            try:
+                for line in open(pth):
+                    line = line.strip()
+                    if line and not line.startswith("#") and os.path.isdir(line):
+                        if line not in sys.path:
+                            sys.path.insert(0, line)
+            except OSError:
+                pass
+
+
 def _invalidate_user_modules() -> None:
     """Remove cached modules from /env/files and /env/repos so
     re-imports pick up the latest source from disk."""
+    _refresh_pth_paths()
     to_remove = []
     for name, mod in sys.modules.items():
         path = getattr(mod, "__file__", None)
