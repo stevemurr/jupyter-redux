@@ -808,6 +808,11 @@
                 if (cell) appendCellOutput(cell, 'result', msg.data);
             });
 
+            ws.on('display', (msg) => {
+                const cell = tab.cells.get(msg.cell_id);
+                if (cell) appendCellDisplay(cell, msg.display_type, msg.data, msg.mime, msg.filename);
+            });
+
             ws.on('error', (msg) => {
                 const cell = tab.cells.get(msg.cell_id);
                 if (cell) {
@@ -856,6 +861,31 @@
                 pre.className = `output-${type}`;
                 pre.textContent = content;
                 cell.outputEl.appendChild(pre);
+            }
+            showCellOutput(cell);
+        }
+
+        function appendCellDisplay(cell, displayType, data, mime, filename) {
+            if (displayType === 'audio' && data) {
+                const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
+                const blob = new Blob([bytes], { type: mime });
+                const url = URL.createObjectURL(blob);
+
+                const wrapper = document.createElement('div');
+                wrapper.className = 'output-display output-audio';
+
+                const label = document.createElement('span');
+                label.className = 'audio-filename';
+                label.textContent = filename || 'audio';
+                wrapper.appendChild(label);
+
+                const audio = document.createElement('audio');
+                audio.controls = true;
+                audio.preload = 'metadata';
+                audio.src = url;
+                wrapper.appendChild(audio);
+
+                cell.outputEl.appendChild(wrapper);
             }
             showCellOutput(cell);
         }
