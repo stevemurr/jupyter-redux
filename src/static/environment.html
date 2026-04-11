@@ -87,6 +87,13 @@
 
         <!-- Main editor area -->
         <div class="env-main">
+            <!-- Build log overlay -->
+            <div class="build-log" id="build-log" style="display:none;">
+                <div class="build-log-header">
+                    <span class="build-log-title">Building container image...</span>
+                </div>
+                <pre class="build-log-content" id="build-log-content"></pre>
+            </div>
             <div class="editor-tabs" id="editor-tabs"></div>
             <div class="file-editor-area" id="editor-area">
                 <div class="file-editor-placeholder" id="editor-placeholder">
@@ -718,11 +725,35 @@
         // =====================================================================
         //  NOTEBOOK EXECUTION (WebSocket)
         // =====================================================================
+        const buildLogEl = document.getElementById('build-log');
+        const buildLogContent = document.getElementById('build-log-content');
+
+        function showBuildLog(show) {
+            buildLogEl.style.display = show ? 'block' : 'none';
+            if (show) buildLogContent.textContent = '';
+        }
+
+        function appendBuildLog(lines) {
+            for (const line of lines) {
+                buildLogContent.textContent += line + '\n';
+            }
+            buildLogContent.scrollTop = buildLogContent.scrollHeight;
+        }
+
         function connectNotebookWs(tab) {
             const ws = new NotebookWebSocket(tab.id);
 
             ws.on('container_state', (msg) => {
                 updateContainerBadge(msg.status, msg.message);
+                if (msg.status === 'building') {
+                    showBuildLog(true);
+                } else if (msg.status === 'ready' || msg.status === 'error') {
+                    showBuildLog(false);
+                }
+            });
+
+            ws.on('build_log', (msg) => {
+                appendBuildLog(msg.lines || []);
             });
 
             ws.on('state', (msg) => {
