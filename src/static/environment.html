@@ -48,6 +48,17 @@
             <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
                 <span id="toggle-icon">&#9664;</span>
             </button>
+
+            <!-- Notebooks (top) -->
+            <div class="sidebar-header">
+                <h3>Notebooks</h3>
+                <div class="sidebar-actions">
+                    <button id="new-notebook-btn" title="New notebook">+ New</button>
+                </div>
+            </div>
+            <div id="notebook-list" style="padding:4px 0;"></div>
+
+            <!-- Files -->
             <div class="sidebar-header">
                 <h3>Files</h3>
                 <div class="sidebar-actions">
@@ -62,25 +73,16 @@
                 </div>
             </div>
 
-            <!-- Repos section -->
+            <!-- Repos -->
             <div class="sidebar-header">
                 <h3>Repos</h3>
                 <div class="sidebar-actions">
                     <button id="btn-clone-repo" title="Clone a repository">+ Clone</button>
                 </div>
             </div>
-            <div class="file-tree" id="repo-list" style="max-height:180px;">
+            <div class="file-tree" id="repo-list">
                 <div class="file-tree-empty" id="repo-list-empty">No repos cloned</div>
             </div>
-
-            <!-- Notebooks -->
-            <div class="sidebar-header" style="margin-top:auto;">
-                <h3>Notebooks</h3>
-                <div class="sidebar-actions">
-                    <button id="new-notebook-btn" title="New notebook">+ New</button>
-                </div>
-            </div>
-            <div id="notebook-list" style="padding:4px 0;overflow-y:auto;max-height:200px;"></div>
         </div>
 
         <!-- Main editor area -->

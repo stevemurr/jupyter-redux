@@ -1011,7 +1011,7 @@ input:focus-visible {
     max-width: 1400px;
     margin: 0 auto;
     padding: 16px 24px;
-    min-height: calc(100vh - 60px);
+    height: calc(100vh - 60px);
 }
 
 .env-sidebar {
@@ -1022,7 +1022,8 @@ input:focus-visible {
     border: 1px solid var(--border-default);
     border-radius: 8px 0 0 8px;
     background: var(--bg-secondary);
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
     transition: width 0.2s ease, min-width 0.2s ease;
 }
 
