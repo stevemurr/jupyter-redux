@@ -389,11 +389,11 @@ class _MonitorWrapContext:
 
 
 _NUMERIC_RE = re.compile(
-    r"(\b[a-zA-Z_][\w]*)\s*[:=]\s*"
+    r"(\b[a-zA-Z_][\w]*)\s*(?:[:=]\s*|\s+)"
     r"([+-]?\d+\.?\d*(?:[eE][+-]?\d+)?)"
 )
 _STEP_RE = re.compile(
-    r"(?:epoch|step|iter(?:ation)?)\s*[:=]?\s*(\d+)",
+    r"(?:epoch|step|iter(?:ation)?)\s*[:=]?\s*(\d+)(?:\s*/\s*\d+)?",
     re.IGNORECASE,
 )
 
