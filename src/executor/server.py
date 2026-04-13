@@ -248,6 +248,112 @@ def is_shell_command(code: str) -> bool:
     return code.strip().startswith("!")
 
 
+def is_apt_command(code: str) -> bool:
+    stripped = code.strip()
+    return stripped.startswith(
+        ("apt install", "apt-get install", "apt remove", "apt-get remove"),
+    )
+
+
+def _parse_apt_cell(code: str) -> tuple[str, list[str]]:
+    """Split an apt cell into (subcommand, list-of-args).
+
+    Accepts both ``apt`` and ``apt-get`` prefixes. Keeps any user-
+    supplied flags (e.g. ``--reinstall``) since they get passed
+    through to apt-get verbatim.
+    """
+    stripped = code.strip()
+    if stripped.startswith("apt-get "):
+        rest = stripped[len("apt-get "):]
+    else:
+        rest = stripped[len("apt "):]
+    tokens = rest.split()
+    if not tokens:
+        return "install", []
+    return tokens[0], tokens[1:]
+
+
+def execute_apt(conn: socket.socket, code: str) -> bool:
+    """Run `apt install` / `apt remove` as root via sudo.
+
+    Requires the Dockerfile's sudoers grant for ``jredux`` to run
+    ``/usr/bin/apt-get`` without a password. Runs ``apt-get update``
+    first because our image builds strip ``/var/lib/apt/lists`` to
+    save space, so a fresh container can't resolve package names.
+    Returns True if any step errored (so handle_message sends the
+    right terminal state).
+    """
+    subcommand, extra_args = _parse_apt_cell(code)
+    env = {
+        **os.environ,
+        "DEBIAN_FRONTEND": "noninteractive",
+        "PYTHONUNBUFFERED": "1",
+    }
+
+    def _run(cmd: list[str]) -> int:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        for line in iter(process.stdout.readline, ""):
+            send_message(conn, {
+                "type": "output", "stream": "stdout", "text": line,
+            })
+        process.wait()
+        return process.returncode
+
+    try:
+        # Refresh the package list (stripped during image build).
+        if subcommand in ("install",):
+            rc = _run(["sudo", "-n", "apt-get", "update"])
+            if rc != 0:
+                send_message(conn, {
+                    "type": "error",
+                    "ename": "AptError",
+                    "evalue": f"apt-get update failed with exit {rc}",
+                    "traceback": [],
+                })
+                return True
+
+        rc = _run([
+            "sudo", "-n", "apt-get", subcommand,
+            "-y", "--no-install-recommends", *extra_args,
+        ])
+        if rc != 0:
+            send_message(conn, {
+                "type": "error",
+                "ename": "AptError",
+                "evalue": f"apt-get {subcommand} failed with exit {rc}",
+                "traceback": [],
+            })
+            return True
+
+        # Quiet reminder that container-level installs are ephemeral.
+        send_message(conn, {
+            "type": "output",
+            "stream": "stderr",
+            "text": (
+                "\n[apt] changes apply to this container only — "
+                "they're lost if the container is restarted or "
+                "recreated. Add persistent deps to the executor "
+                "Dockerfile when you're sure you want them.\n"
+            ),
+        })
+        return False
+    except Exception as e:
+        send_message(conn, {
+            "type": "error",
+            "ename": type(e).__name__,
+            "evalue": str(e),
+            "traceback": traceback.format_exception(e),
+        })
+        return True
+
+
 def execute_pip(conn: socket.socket, args: list[str]) -> None:
     """Run pip as a list of args (no shell interpretation)."""
     try:
@@ -645,6 +751,8 @@ def handle_message(conn: socket.socket, msg: dict) -> None:
                 execute_pip(conn, ["python", "-m", *stripped.split()])
         elif is_requirements_block(code):
             execute_pip(conn, requirements_to_pip_args(code))
+        elif is_apt_command(code):
+            errored = execute_apt(conn, code)
         elif is_shell_command(code):
             execute_shell(conn, code[1:].strip())
         else:

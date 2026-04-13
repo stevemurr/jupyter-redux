@@ -4,8 +4,16 @@ ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim AS cpu
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git gosu && \
+    apt-get install -y --no-install-recommends git gosu sudo && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Let the jredux user run apt-get (and nothing else) as root without
+# a password, so notebook cells can `apt install <pkg>` to pick up
+# system dependencies. The user is created at container startup by
+# entrypoint.sh, but sudoers resolves names at invocation time so
+# referencing it here is fine.
+RUN echo 'jredux ALL=(root) NOPASSWD: /usr/bin/apt-get' > /etc/sudoers.d/jredux-apt && \
+    chmod 440 /etc/sudoers.d/jredux-apt
 
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
@@ -29,7 +37,7 @@ ARG PYTHON_VERSION=3.11
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        software-properties-common gpg-agent git gosu && \
+        software-properties-common gpg-agent git gosu sudo && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -38,6 +46,10 @@ RUN apt-get update && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
     python -m ensurepip --upgrade && \
     ln -sf /usr/local/bin/pip${PYTHON_VERSION} /usr/local/bin/pip 2>/dev/null; true
+
+# Same sudoers grant as the cpu target — see the note there.
+RUN echo 'jredux ALL=(root) NOPASSWD: /usr/bin/apt-get' > /etc/sudoers.d/jredux-apt && \
+    chmod 440 /etc/sudoers.d/jredux-apt
 
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
