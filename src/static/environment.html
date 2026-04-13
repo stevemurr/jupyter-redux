@@ -10,8 +10,9 @@
     <script type="module">
         import {
             EditorView, keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
-            EditorState, defaultKeymap, python,
-            syntaxHighlighting, defaultHighlightStyle, oneDark
+            EditorState, defaultKeymap, python, pythonLanguage,
+            syntaxHighlighting, defaultHighlightStyle, oneDark,
+            autocompletion, completionKeymap, acceptCompletion
         } from '/static/js/cm-bundle.js';
 
         window.EditorView = EditorView;
@@ -19,81 +20,117 @@
         window.keymap = keymap;
         window.defaultKeymap = defaultKeymap;
         window.python = python;
+        window.pythonLanguage = pythonLanguage;
         window.lineNumbers = lineNumbers;
         window.highlightActiveLine = highlightActiveLine;
         window.highlightActiveLineGutter = highlightActiveLineGutter;
         window.syntaxHighlighting = syntaxHighlighting;
         window.defaultHighlightStyle = defaultHighlightStyle;
         window.oneDark = oneDark;
+        window.autocompletion = autocompletion;
+        window.completionKeymap = completionKeymap;
+        window.acceptCompletion = acceptCompletion;
 
         window.dispatchEvent(new Event('codemirror-ready'));
     </script>
 </head>
 <body>
-    <header class="app-header">
-        <a href="/" class="btn btn-small" aria-label="Back to environments">&larr; Back</a>
-        <div class="toolbar-separator"></div>
-        <input type="text" class="notebook-title" id="env-title"
-               aria-label="Environment name" placeholder="Untitled Environment">
-        <div class="toolbar-spacer"></div>
-        <div class="notebook-card-badges" id="env-badges" style="display:flex;align-items:center;gap:8px;"></div>
-        <div class="container-badge none" id="container-badge" aria-live="polite">
-            <span class="badge-dot">&#9679;</span> <span class="badge-text">No container</span>
-        </div>
-    </header>
-
     <div class="env-layout">
         <!-- Sidebar -->
         <div class="env-sidebar" id="env-sidebar">
-            <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
-                <span id="toggle-icon">&#9664;</span>
-            </button>
-
-            <!-- Notebooks (top) -->
-            <div class="sidebar-header">
-                <h3>Notebooks</h3>
-                <div class="sidebar-actions">
-                    <button id="new-notebook-btn" title="New notebook">+ New</button>
-                </div>
-            </div>
-            <div id="notebook-list" style="padding:4px 0;"></div>
-
-            <!-- Files -->
-            <div class="sidebar-header">
-                <h3>Files</h3>
-                <div class="sidebar-actions">
-                    <button id="btn-new-file" title="New file">+ File</button>
-                    <button id="btn-new-dir" title="New folder">+ Dir</button>
-                    <button id="btn-refresh-files" title="Refresh">&#8635;</button>
-                </div>
-            </div>
-            <div class="file-tree" id="file-tree">
-                <div class="file-tree-empty" id="file-tree-empty">
-                    Container not running.<br>Open a notebook to start.
-                </div>
+            <!-- Top bar: always visible in both states -->
+            <div class="sidebar-topbar">
+                <a href="/" class="sidebar-back" aria-label="Back to environments" title="Back to environments">&larr;</a>
+                <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar">
+                    <span id="toggle-icon">&#9664;</span>
+                </button>
             </div>
 
-            <!-- Repos -->
-            <div class="sidebar-header">
-                <h3>Repos</h3>
-                <div class="sidebar-actions">
-                    <button id="btn-clone-repo" title="Clone a repository">+ Clone</button>
+            <!-- Scrollable middle: hides when collapsed -->
+            <div class="sidebar-middle">
+                <!-- Environment -->
+                <div class="sidebar-header">
+                    <h3>Environment</h3>
+                </div>
+                <div class="sidebar-env-meta">
+                    <input type="text" class="env-title-input" id="env-title"
+                           aria-label="Environment name" placeholder="Untitled Environment">
+                    <div class="notebook-card-badges" id="env-badges"></div>
+                </div>
+
+                <!-- Notebooks -->
+                <div class="sidebar-header">
+                    <h3>Notebooks</h3>
+                    <div class="sidebar-actions">
+                        <button id="new-notebook-btn" title="New notebook">+ New</button>
+                    </div>
+                </div>
+                <div id="notebook-list" style="padding:4px 0;"></div>
+
+                <!-- Datasets (read-only browse of /shared/datasets) -->
+                <div class="sidebar-header shared-header collapsed" data-target="datasets-tree">
+                    <span class="section-chevron">&#9654;</span>
+                    <h3>Datasets</h3>
+                    <div class="sidebar-actions">
+                        <button class="btn-refresh-shared" data-root="datasets" title="Refresh">&#8635;</button>
+                    </div>
+                </div>
+                <div class="file-tree shared-tree" id="datasets-tree" style="display:none;">
+                    <div class="file-tree-empty">No datasets yet.</div>
+                </div>
+
+                <!-- Artifacts (read-only browse of /shared/artifacts) -->
+                <div class="sidebar-header shared-header collapsed" data-target="artifacts-tree">
+                    <span class="section-chevron">&#9654;</span>
+                    <h3>Artifacts</h3>
+                    <div class="sidebar-actions">
+                        <button class="btn-refresh-shared" data-root="artifacts" title="Refresh">&#8635;</button>
+                    </div>
+                </div>
+                <div class="file-tree shared-tree" id="artifacts-tree" style="display:none;">
+                    <div class="file-tree-empty">No artifacts yet.</div>
+                </div>
+
+                <!-- Repos -->
+                <div class="sidebar-header">
+                    <h3>Repos</h3>
+                    <div class="sidebar-actions">
+                        <button id="btn-clone-repo" title="Clone a repository">+ Clone</button>
+                    </div>
+                </div>
+                <div class="file-tree" id="repo-list">
+                    <div class="file-tree-empty" id="repo-list-empty">No repos cloned</div>
                 </div>
             </div>
-            <div class="file-tree" id="repo-list">
-                <div class="file-tree-empty" id="repo-list-empty">No repos cloned</div>
+
+            <!-- Bottom bar: always visible in both states -->
+            <div class="sidebar-bottom">
+                <div class="resource-monitor" id="resource-monitor">
+                    <div class="resource-bar" data-metric="cpu" title="CPU usage">
+                        <span class="rb-label">CPU</span>
+                        <div class="rb-track"><div class="rb-fill"></div></div>
+                        <span class="rb-readout">—</span>
+                    </div>
+                    <div class="resource-bar" data-metric="mem" title="Memory usage">
+                        <span class="rb-label">MEM</span>
+                        <div class="rb-track"><div class="rb-fill"></div></div>
+                        <span class="rb-readout">—</span>
+                    </div>
+                    <div class="resource-bar" data-metric="gpu" title="GPU memory usage">
+                        <span class="rb-label">GPU</span>
+                        <div class="rb-track"><div class="rb-fill"></div></div>
+                        <span class="rb-readout">—</span>
+                    </div>
+                </div>
+                <div class="container-badge none" id="container-badge" aria-live="polite">
+                    <span class="badge-spinner"></span>
+                    <span class="badge-dot">&#9679;</span> <span class="badge-text">No container</span>
+                </div>
             </div>
         </div>
 
         <!-- Main editor area -->
         <div class="env-main">
-            <!-- Build log overlay -->
-            <div class="build-log" id="build-log" style="display:none;">
-                <div class="build-log-header">
-                    <span class="build-log-title">Building container image...</span>
-                </div>
-                <pre class="build-log-content" id="build-log-content"></pre>
-            </div>
             <div class="editor-tabs" id="editor-tabs"></div>
             <div class="file-editor-area" id="editor-area">
                 <div class="file-editor-placeholder" id="editor-placeholder">
@@ -150,12 +187,21 @@
             <h2 class="dialog-title">Project Detected</h2>
             <p id="install-message" style="font-size:0.9rem;color:var(--text-secondary);margin-bottom:12px;"></p>
             <div id="install-markers" style="font-family:var(--font-mono);font-size:0.8rem;color:var(--accent-cyan);margin-bottom:16px;"></div>
-            <pre id="install-log" style="display:none;background:var(--bg-output);border:1px solid var(--border-default);border-radius:4px;padding:8px 10px;font-family:var(--font-mono);font-size:0.75rem;line-height:1.5;color:var(--text-secondary);max-height:250px;overflow-y:auto;white-space:pre-wrap;word-wrap:break-word;margin-bottom:12px;"></pre>
-            <div id="install-status" style="display:none;font-size:0.85rem;margin-bottom:12px;"></div>
             <div class="dialog-actions">
                 <button class="btn" id="install-skip">Skip</button>
                 <button class="btn btn-primary" id="install-run">Install as Editable Package</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Build log overlay -->
+    <div class="build-log-overlay" id="build-log-overlay">
+        <div class="build-log" id="build-log">
+            <div class="build-log-header">
+                <span class="build-log-title">Building container image...</span>
+                <button class="build-log-close" id="build-log-close" title="Close">&times;</button>
+            </div>
+            <pre class="build-log-content" id="build-log-content"></pre>
         </div>
     </div>
 
@@ -173,8 +219,8 @@
         const titleInput = document.getElementById('env-title');
         const badgesEl = document.getElementById('env-badges');
         const containerBadge = document.getElementById('container-badge');
-        const fileTree = document.getElementById('file-tree');
-        const fileTreeEmpty = document.getElementById('file-tree-empty');
+        const datasetsTree = document.getElementById('datasets-tree');
+        const artifactsTree = document.getElementById('artifacts-tree');
         const tabsBar = document.getElementById('editor-tabs');
         const editorArea = document.getElementById('editor-area');
         const editorPlaceholder = document.getElementById('editor-placeholder');
@@ -186,6 +232,7 @@
         const sidebar = document.getElementById('env-sidebar');
         const toggleBtn = document.getElementById('sidebar-toggle');
         const toggleIcon = document.getElementById('toggle-icon');
+        const _installingRepos = new Set();
 
         // --- Sidebar collapse ---
         function setSidebarCollapsed(collapsed) {
@@ -218,7 +265,6 @@
             const notebooks = data.notebooks || [];
             renderNotebooks(notebooks);
             if (data.container_state && data.container_state.status === 'ready') {
-                loadFileTree();
                 loadRepos();
             }
 
@@ -281,75 +327,236 @@
         }
 
         // =====================================================================
-        //  SIDEBAR: FILE TREE
+        //  SIDEBAR: SHARED TREES (Datasets + Artifacts)
         // =====================================================================
-        async function loadFileTree() {
-            const data = await api.get(`/api/environments/${envId}/files`);
-            if (!data || !data.entries) {
-                fileTreeEmpty.style.display = 'block';
-                fileTreeEmpty.textContent = 'No files yet. Create one to get started.';
-                return;
-            }
-            fileTreeEmpty.style.display = 'none';
-            renderFileTree(data.entries);
+        // Read-only browsers rooted at /shared/datasets and /shared/artifacts.
+        // Users don't edit files through these — they're for awareness of
+        // what's available. Directory-level collapse state is per-tree so
+        // Datasets and Artifacts don't clobber each other.
+        const _sharedCollapsedDirs = {
+            datasets: new Set(),
+            artifacts: new Set(),
+        };
+
+        function formatSize(b) {
+            if (b < 1024) return b + 'B';
+            if (b < 1048576) return (b / 1024).toFixed(1) + 'K';
+            if (b < 1073741824) return (b / 1048576).toFixed(1) + 'M';
+            return (b / 1073741824).toFixed(1) + 'G';
         }
 
-        function renderFileTree(entries) {
-            fileTree.querySelectorAll('.file-entry').forEach(el => el.remove());
+        async function loadSharedTree(root) {
+            const container = root === 'datasets' ? datasetsTree : artifactsTree;
+            const data = await api.get(`/api/shared/${root}`);
+            const entries = (data && data.entries) || [];
+            renderSharedTree(container, root, entries);
+        }
+
+        function renderSharedTree(container, root, entries) {
+            container.querySelectorAll('.file-entry').forEach(el => el.remove());
+            const empty = container.querySelector('.file-tree-empty');
             if (entries.length === 0) {
-                fileTreeEmpty.style.display = 'block';
-                fileTreeEmpty.textContent = 'No files yet. Create one to get started.';
+                if (empty) empty.style.display = 'block';
                 return;
             }
-            fileTreeEmpty.style.display = 'none';
-            const dirs = entries.filter(e => e.type==='directory').sort((a,b) => a.path.localeCompare(b.path));
-            const files = entries.filter(e => e.type==='file').sort((a,b) => a.path.localeCompare(b.path));
-            for (const entry of [...dirs, ...files]) {
+            if (empty) empty.style.display = 'none';
+
+            // Sort into tree order (dirs first, then alphabetical).
+            const byParent = new Map();
+            for (const e of entries) {
+                const parent = e.path.includes('/') ? e.path.substring(0, e.path.lastIndexOf('/')) : '';
+                if (!byParent.has(parent)) byParent.set(parent, []);
+                byParent.get(parent).push(e);
+            }
+            for (const group of byParent.values()) {
+                group.sort((a, b) => {
+                    if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                });
+            }
+            const ordered = [];
+            function walkTree(parentPath) {
+                const children = byParent.get(parentPath);
+                if (!children) return;
+                for (const child of children) {
+                    ordered.push(child);
+                    if (child.type === 'directory') walkTree(child.path);
+                }
+            }
+            walkTree('');
+
+            const collapsedSet = _sharedCollapsedDirs[root];
+            const allEntries = ordered;
+            for (const entry of allEntries) {
+                let hidden = false;
+                if (entry.path.includes('/')) {
+                    const parts = entry.path.split('/');
+                    for (let i = 1; i < parts.length; i++) {
+                        const ancestor = parts.slice(0, i).join('/');
+                        if (collapsedSet.has(ancestor)) { hidden = true; break; }
+                    }
+                }
+
                 const el = document.createElement('div');
-                el.className = `file-entry ${entry.type==='directory'?'directory':''}`;
-                if (entry.path === activeTabKey) el.classList.add('active');
+                el.className = `file-entry ${entry.type === 'directory' ? 'directory' : ''}`;
+                if (hidden) el.style.display = 'none';
+
                 const depth = entry.path.split('/').length - 1;
-                const icon = entry.type==='directory' ? '&#128193;' : '&#128196;';
+                const isDir = entry.type === 'directory';
+                const collapsed = collapsedSet.has(entry.path);
+                const chevron = isDir ? (collapsed ? '&#9654;' : '&#9660;') : '';
+                const icon = isDir ? '&#128193;' : '&#128196;';
                 const sizeStr = entry.size != null ? formatSize(entry.size) : '';
                 el.innerHTML = `
-                    <span class="file-icon" style="margin-left:${depth*12}px">${icon}</span>
+                    <span class="dir-chevron" style="margin-left:${depth * 12}px;width:10px;font-size:0.5rem;flex-shrink:0;text-align:center;">${chevron}</span>
+                    <span class="file-icon">${icon}</span>
                     <span class="file-name">${escapeHtml(entry.name)}</span>
                     <span class="file-size">${sizeStr}</span>
-                    <div class="file-entry-actions">
-                        <button class="rename-btn" title="Rename">&#9998;</button>
-                        <button class="delete-btn" title="Delete">&#10005;</button>
-                    </div>
                 `;
-                el.addEventListener('click', (e) => {
-                    if (e.target.closest('.rename-btn')) { e.stopPropagation(); renameFileEntry(entry); return; }
-                    if (e.target.closest('.delete-btn')) { e.stopPropagation(); deleteFileEntry(entry); return; }
-                    if (entry.type==='file') openFileTab(entry.path);
+                if (isDir) {
+                    el.addEventListener('click', () => {
+                        if (collapsedSet.has(entry.path)) collapsedSet.delete(entry.path);
+                        else collapsedSet.add(entry.path);
+                        renderSharedTree(container, root, entries);
+                    });
+                }
+                container.appendChild(el);
+            }
+        }
+
+        function refreshSharedTrees() {
+            loadSharedTree('datasets');
+            loadSharedTree('artifacts');
+        }
+
+        // =====================================================================
+        //  SHARED PATH COMPLETION (for CodeMirror, inside string literals)
+        // =====================================================================
+        // Cache the /api/shared/{root} tree once per tab session. Invalidated
+        // when the user clicks Refresh on a section or when a cell emits a
+        // `created_dirs` WS event (which means artifacts may have grown).
+        const _sharedPathCache = { datasets: null, artifacts: null };
+
+        function invalidateSharedPathCache(root) {
+            if (root) _sharedPathCache[root] = null;
+            else {
+                _sharedPathCache.datasets = null;
+                _sharedPathCache.artifacts = null;
+            }
+        }
+
+        async function getSharedPathTree(root) {
+            if (_sharedPathCache[root] !== null) return _sharedPathCache[root];
+            try {
+                const data = await api.get(`/api/shared/${root}`);
+                _sharedPathCache[root] = (data && data.entries) || [];
+            } catch {
+                _sharedPathCache[root] = [];
+            }
+            return _sharedPathCache[root];
+        }
+
+        // CodeMirror CompletionSource: triggers inside string literals whose
+        // content starts with /shared/datasets/ or /shared/artifacts/. Returns
+        // null to pass through to other completion sources when out of scope.
+        async function sharedPathCompletion(context) {
+            const line = context.state.doc.lineAt(context.pos);
+            const before = line.text.slice(0, context.pos - line.from);
+
+            // Scan backward for the last unescaped quote on the same line.
+            let quoteIdx = -1;
+            for (let i = before.length - 1; i >= 0; i--) {
+                const ch = before[i];
+                if ((ch === '"' || ch === "'") && (i === 0 || before[i - 1] !== '\\')) {
+                    quoteIdx = i;
+                    break;
+                }
+            }
+            if (quoteIdx === -1) return null;
+
+            // Make sure the string hasn't already been closed before the cursor.
+            const quoteChar = before[quoteIdx];
+            for (let i = quoteIdx + 1; i < before.length; i++) {
+                if (before[i] === quoteChar && before[i - 1] !== '\\') return null;
+            }
+
+            const content = before.slice(quoteIdx + 1);
+            let root = null;
+            let prefix = null;
+            if (content.startsWith('/shared/datasets/')) {
+                root = 'datasets';
+                prefix = '/shared/datasets/';
+            } else if (content.startsWith('/shared/artifacts/')) {
+                root = 'artifacts';
+                prefix = '/shared/artifacts/';
+            } else {
+                return null;
+            }
+
+            const entries = await getSharedPathTree(root);
+            if (!entries || entries.length === 0) return null;
+
+            // Split the relative path into (directory, partial-name).
+            const relPath = content.slice(prefix.length);
+            const lastSlash = relPath.lastIndexOf('/');
+            const dirPart = lastSlash >= 0 ? relPath.slice(0, lastSlash) : '';
+            const namePart = lastSlash >= 0 ? relPath.slice(lastSlash + 1) : relPath;
+            const nameLower = namePart.toLowerCase();
+
+            // Collect direct children of dirPart whose names start with namePart.
+            const options = [];
+            for (const e of entries) {
+                const parent = e.path.includes('/')
+                    ? e.path.substring(0, e.path.lastIndexOf('/'))
+                    : '';
+                if (parent !== dirPart) continue;
+                if (!e.name.toLowerCase().startsWith(nameLower)) continue;
+
+                const isDir = e.type === 'directory';
+                options.push({
+                    label: e.name + (isDir ? '/' : ''),
+                    apply: e.name + (isDir ? '/' : ''),
+                    type: isDir ? 'folder' : 'file',
+                    boost: isDir ? 1 : 0,
+                    detail: !isDir && e.size != null ? formatSize(e.size) : undefined,
                 });
-                fileTree.appendChild(el);
             }
+
+            if (options.length === 0) return null;
+            return {
+                from: context.pos - namePart.length,
+                options,
+                validFor: /^[\w.\-]*$/,
+            };
         }
 
-        function formatSize(b) { if(b<1024) return b+'B'; if(b<1048576) return (b/1024).toFixed(1)+'K'; return (b/1048576).toFixed(1)+'M'; }
+        // Section header toggle: click header to expand/collapse the tree.
+        // Default state is collapsed (see HTML's initial `collapsed` class).
+        document.querySelectorAll('.shared-header').forEach(header => {
+            header.addEventListener('click', (e) => {
+                // Don't toggle when clicking the refresh button
+                if (e.target.closest('.btn-refresh-shared')) return;
+                const targetId = header.dataset.target;
+                const target = document.getElementById(targetId);
+                const collapsed = header.classList.toggle('collapsed');
+                header.querySelector('.section-chevron').innerHTML = collapsed ? '&#9654;' : '&#9660;';
+                target.style.display = collapsed ? 'none' : 'block';
+                if (!collapsed) {
+                    // Lazy-load on first expand so fresh contents appear
+                    const root = targetId === 'datasets-tree' ? 'datasets' : 'artifacts';
+                    loadSharedTree(root);
+                }
+            });
+        });
 
-        async function renameFileEntry(entry) {
-            const newName = prompt('Rename to:', entry.name);
-            if (!newName || newName === entry.name) return;
-            const parts = entry.path.split('/'); parts[parts.length-1] = newName;
-            const newPath = parts.join('/');
-            await api.post(`/api/environments/${envId}/files/rename`, { old_path:entry.path, new_path:newPath });
-            if (openTabs.has(entry.path)) {
-                const td = openTabs.get(entry.path); openTabs.delete(entry.path); openTabs.set(newPath, td);
-                if (activeTabKey === entry.path) activeTabKey = newPath;
-            }
-            loadFileTree(); renderTabsBar();
-        }
-
-        async function deleteFileEntry(entry) {
-            if (!confirm(`Delete "${entry.name}"?`)) return;
-            await api.del(`/api/environments/${envId}/files?path=${encodeURIComponent(entry.path)}`);
-            if (openTabs.has(entry.path)) closeTab(entry.path);
-            loadFileTree();
-        }
+        // Per-section refresh button
+        document.querySelectorAll('.btn-refresh-shared').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                invalidateSharedPathCache(btn.dataset.root);
+                loadSharedTree(btn.dataset.root);
+            });
+        });
 
         // =====================================================================
         //  SIDEBAR: REPOS
@@ -372,12 +579,21 @@
                     <span class="file-icon">&#128230;</span>
                     <span class="file-name">${escapeHtml(repo.name)}${badges}</span>
                     <div class="file-entry-actions">
+                        <button class="pull-btn" title="Pull latest">&#8595;</button>
                         ${repo.installable ? '<button class="install-btn" title="pip install -e">Install</button>' : ''}
                         <button class="delete-btn" title="Remove">&#10005;</button>
                     </div>
                 `;
+                el.querySelector('.pull-btn').addEventListener('click', (e) => { e.stopPropagation(); doPullRepo(repo.name); });
                 if (el.querySelector('.install-btn')) el.querySelector('.install-btn').addEventListener('click', (e) => { e.stopPropagation(); doInstallRepo(repo.name); });
                 el.querySelector('.delete-btn').addEventListener('click', (e) => { e.stopPropagation(); deleteRepo(repo.name); });
+                // Restore spinner if this repo is currently installing
+                if (_installingRepos.has(repo.name)) {
+                    el.classList.add('installing');
+                    const sp = document.createElement('span');
+                    sp.className = 'repo-spinner';
+                    el.appendChild(sp);
+                }
                 repoList.appendChild(el);
             }
         }
@@ -440,7 +656,6 @@
         }
 
         function updateSidebarSelection() {
-            fileTree.querySelectorAll('.file-entry').forEach(el => el.classList.remove('active'));
             notebookList.querySelectorAll('.file-entry').forEach(el => el.classList.remove('active'));
         }
 
@@ -501,8 +716,10 @@
                 syntaxHighlighting(defaultHighlightStyle, { fallback:true }), oneDark,
                 keymap.of([
                     { key:'Mod-s', run:() => { saveFile(key); return true; } },
+                    ...completionKeymap,
                     ...defaultKeymap,
                 ]),
+                ...(isPython ? [python(), autocompletion()] : []),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged) {
                         tab.content = update.state.doc.toString();
@@ -511,7 +728,6 @@
                         scheduleSave(key);
                     }
                 }),
-                ...(isPython ? [python()] : []),
             ];
 
             const editor = new EditorView({
@@ -579,17 +795,16 @@
                 <button class="btn btn-small nb-add-code">+ Code</button>
                 <button class="btn btn-small nb-run-all">Run All</button>
                 <button class="btn btn-small btn-stop nb-interrupt" style="display:none;">Stop</button>
+                <button class="btn btn-small btn-force-stop nb-force-stop" style="display:none;" title="Kill the kernel — loses all notebook namespace">Force Stop</button>
                 <div class="toolbar-spacer"></div>
                 <span class="nb-save-status" style="font-size:0.8rem;color:var(--text-muted);"></span>
             `;
             wrap.appendChild(toolbar);
 
-            // Cells container
+            // Cells container — styling (flex, overflow, padding) is
+            // handled by the .cells-container CSS class.
             const cellsDiv = document.createElement('div');
             cellsDiv.className = 'cells-container';
-            cellsDiv.style.flex = '1';
-            cellsDiv.style.overflowY = 'auto';
-            cellsDiv.style.padding = '0';
             wrap.appendChild(cellsDiv);
 
             tab.container = wrap;
@@ -608,7 +823,13 @@
             // Toolbar handlers
             toolbar.querySelector('.nb-add-code').addEventListener('click', () => addNewCell(tab));
             toolbar.querySelector('.nb-run-all').addEventListener('click', () => runAllCells(tab));
-            toolbar.querySelector('.nb-interrupt').addEventListener('click', () => { if (tab.ws) tab.ws.interrupt(tab._runningCellId || ''); });
+            toolbar.querySelector('.nb-interrupt').addEventListener('click', () => {
+                if (tab.ws) tab.ws.interrupt(tab._runningCellId || '');
+            });
+            toolbar.querySelector('.nb-force-stop').addEventListener('click', () => {
+                if (tab.ws) tab.ws.forceStop(tab._runningCellId || '');
+                hideForceStopButton(tab);
+            });
         }
 
         function addCellToTab(tab, cellData) {
@@ -640,18 +861,24 @@
             editorWrap.className = 'cell-editor';
             el.appendChild(editorWrap);
 
-            // Output (collapsible)
+            // Output wrapper has two zones: pinned (always visible, for
+            // custom views like the training monitor / audio displays) and
+            // the collapsible log (stdout/stderr/result/error).
             const outputWrap = document.createElement('div');
             outputWrap.className = 'cell-output-wrapper collapsed';
             outputWrap.style.display = 'none';
 
+            const pinnedEl = document.createElement('div');
+            pinnedEl.className = 'cell-output-pinned';
+
             const outputToggle = document.createElement('button');
             outputToggle.className = 'output-toggle';
-            outputToggle.setAttribute('aria-label', 'Toggle output');
+            outputToggle.setAttribute('aria-label', 'Toggle output log');
 
             const outputEl = document.createElement('div');
             outputEl.className = 'cell-output';
 
+            outputWrap.appendChild(pinnedEl);
             outputWrap.appendChild(outputToggle);
             outputWrap.appendChild(outputEl);
             el.appendChild(outputWrap);
@@ -666,12 +893,19 @@
                 keymap.of([
                     { key:'Shift-Enter', run:() => { executeCell(tab, cellId); return true; } },
                     { key:'Ctrl-Enter', run:() => { executeCell(tab, cellId); return true; } },
+                    { key:'Tab', run: acceptCompletion },
+                    ...completionKeymap,
                     ...defaultKeymap,
                 ]),
+                python(),
+                // /shared/{datasets,artifacts}/* path completion inside
+                // string literals — registered via Python language data so
+                // it composes with the default completion sources.
+                window.pythonLanguage.data.of({ autocomplete: sharedPathCompletion }),
+                autocompletion(),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged) scheduleCellSave(tab, cellId, update.state.doc.toString());
                 }),
-                python(),
             ];
 
             const editor = new EditorView({
@@ -679,7 +913,7 @@
                 parent: editorWrap,
             });
 
-            const cellInfo = { id: cellId, el, editor, outputEl, outputWrap, outputToggle, execCountEl: header.querySelector('.cell-exec-count'), monitors: {} };
+            const cellInfo = { id: cellId, el, editor, outputEl, pinnedEl, outputWrap, outputToggle, execCountEl: header.querySelector('.cell-exec-count'), monitors: {} };
 
             outputToggle.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -695,6 +929,27 @@
             }
             if (cellData.execution_count != null) {
                 cellInfo.execCountEl.textContent = `In [${cellData.execution_count}]:`;
+            }
+
+            // Restore the visual execution state from persistence. This
+            // matters on browser reload: if a cell is still running, the
+            // WS replay from exec_manager will re-send the running state
+            // message, but we don't want a flash of "no state" while we
+            // wait for that message — and if the backend restarted and
+            // lost the in-flight record, at least the persisted state
+            // is accurate enough to drive the UI.
+            const state = cellData.execution_state;
+            if (state === 'running') {
+                el.className = 'cell running';
+                cellInfo.execCountEl.textContent = 'In [*]:';
+                cellInfo.execCountEl.className = 'cell-exec-count running';
+                tab._runningCellId = cellId;
+                const interruptBtn = tab.toolbar.querySelector('.nb-interrupt');
+                if (interruptBtn) interruptBtn.style.display = 'inline-flex';
+            } else if (state === 'completed') {
+                el.className = 'cell completed';
+            } else if (state === 'errored') {
+                el.className = 'cell errored';
             }
 
             // Button handlers
@@ -731,16 +986,28 @@
         // =====================================================================
         //  NOTEBOOK EXECUTION (WebSocket)
         // =====================================================================
+        const buildLogOverlay = document.getElementById('build-log-overlay');
         const buildLogEl = document.getElementById('build-log');
         const buildLogTitle = buildLogEl.querySelector('.build-log-title');
         const buildLogContent = document.getElementById('build-log-content');
+        const buildLogClose = document.getElementById('build-log-close');
+        let _buildActive = false;
 
-        function showBuildLog(show, title) {
-            buildLogEl.style.display = show ? 'block' : 'none';
-            if (show) {
-                buildLogTitle.textContent = title || 'Building container image...';
-                buildLogContent.textContent = '';
-            }
+        function setBuildLogVisible(visible) {
+            buildLogOverlay.classList.toggle('visible', visible);
+        }
+
+        function startBuildLog(title) {
+            _buildActive = true;
+            buildLogTitle.textContent = title || 'Building container image...';
+            buildLogContent.textContent = '';
+            containerBadge.classList.add('clickable');
+        }
+
+        function endBuildLog() {
+            _buildActive = false;
+            containerBadge.classList.remove('clickable');
+            setBuildLogVisible(false);
         }
 
         function appendBuildLog(text) {
@@ -754,23 +1021,172 @@
             buildLogContent.scrollTop = buildLogContent.scrollHeight;
         }
 
+        // Click badge to toggle build log overlay
+        containerBadge.addEventListener('click', () => {
+            if (!_buildActive) return;
+            setBuildLogVisible(!buildLogOverlay.classList.contains('visible'));
+        });
+
+        // Close button inside overlay
+        buildLogClose.addEventListener('click', () => {
+            setBuildLogVisible(false);
+        });
+
+        // Click backdrop to dismiss
+        buildLogOverlay.addEventListener('click', (e) => {
+            if (e.target === buildLogOverlay) setBuildLogVisible(false);
+        });
+
+        // =====================================================================
+        //  RESOURCE MONITOR (sidebar bars)
+        // =====================================================================
+        const resourceMonitorEl = document.getElementById('resource-monitor');
+        const resourceBars = {
+            cpu: resourceMonitorEl.querySelector('[data-metric="cpu"]'),
+            mem: resourceMonitorEl.querySelector('[data-metric="mem"]'),
+            gpu: resourceMonitorEl.querySelector('[data-metric="gpu"]'),
+        };
+        let _lastResourceAt = 0;
+
+        function formatBytes(n) {
+            if (!n) return '0';
+            const units = ['B', 'K', 'M', 'G', 'T'];
+            let i = 0;
+            let v = n;
+            while (v >= 1024 && i < units.length - 1) {
+                v /= 1024;
+                i++;
+            }
+            return (v >= 10 ? Math.round(v) : v.toFixed(1)) + units[i];
+        }
+
+        function setBar(bar, fillPct, readout, title) {
+            if (!bar) return;
+            const clamped = Math.max(0, Math.min(100, fillPct));
+            bar.querySelector('.rb-fill').style.width = clamped + '%';
+            bar.querySelector('.rb-readout').textContent = readout;
+            if (title) bar.title = title;
+            bar.classList.remove('stale');
+        }
+
+        function dimBar(bar) {
+            if (!bar) return;
+            bar.classList.add('stale');
+        }
+
+        function updateResourceBars(msg) {
+            _lastResourceAt = Date.now();
+
+            const container = msg.container;
+            if (container) {
+                setBar(
+                    resourceBars.cpu,
+                    container.cpu_pct || 0,
+                    (container.cpu_pct || 0).toFixed(0) + '%',
+                    `Host CPU: ${(container.cpu_pct || 0).toFixed(1)}% across all cores`,
+                );
+                const memUsed = container.mem_used || 0;
+                const memTotal = container.mem_total || 0;
+                const memPct = memTotal ? (memUsed / memTotal) * 100 : 0;
+                setBar(
+                    resourceBars.mem,
+                    memPct,
+                    formatBytes(memUsed),
+                    `Host memory: ${formatBytes(memUsed)} / ${formatBytes(memTotal)} used`,
+                );
+            } else {
+                dimBar(resourceBars.cpu);
+                dimBar(resourceBars.mem);
+            }
+
+            const gpu = msg.gpu;
+            if (gpu) {
+                // Discrete GPUs report memory; unified-memory devices
+                // (e.g. Grace Blackwell / GB10) don't have a separate
+                // VRAM pool, so only utilization is meaningful.
+                if (gpu.mem_total && gpu.mem_used != null) {
+                    const gpuPct = (gpu.mem_used / gpu.mem_total) * 100;
+                    setBar(
+                        resourceBars.gpu,
+                        gpuPct,
+                        formatBytes(gpu.mem_used),
+                        `GPU memory: ${formatBytes(gpu.mem_used)} / ${formatBytes(gpu.mem_total)}` +
+                        ` (util ${gpu.util_pct || 0}%)`,
+                    );
+                } else {
+                    // Fall back to utilization as the bar fill.
+                    const util = gpu.util_pct || 0;
+                    setBar(
+                        resourceBars.gpu,
+                        util,
+                        util + '%',
+                        `GPU utilization: ${util}% (unified memory — see MEM bar for allocation)`,
+                    );
+                }
+            } else {
+                dimBar(resourceBars.gpu);
+                resourceBars.gpu.querySelector('.rb-readout').textContent = 'n/a';
+            }
+        }
+
+        // If no stats have arrived for >5s, fade the bars to indicate staleness.
+        setInterval(() => {
+            if (_lastResourceAt === 0) return;
+            if (Date.now() - _lastResourceAt > 5000) {
+                for (const bar of Object.values(resourceBars)) dimBar(bar);
+            }
+        }, 1000);
+
+        // =====================================================================
+        //  FORCE STOP ESCALATION
+        // =====================================================================
+        // After a cell enters the "stopping" state, if it's still not
+        // finished FORCE_STOP_DELAY_MS later we surface the Force Stop
+        // button in the notebook toolbar. The user is expected to have
+        // already decided Interrupt isn't working.
+        const FORCE_STOP_DELAY_MS = 3000;
+
+        function scheduleForceStopButton(tab, cellId) {
+            clearForceStopTimer(tab);
+            tab._forceStopTimer = setTimeout(() => {
+                tab._forceStopTimer = null;
+                // Only show if the cell is still stopping.
+                if (tab._runningCellId !== cellId) return;
+                const btn = tab.toolbar.querySelector('.nb-force-stop');
+                if (btn) btn.style.display = 'inline-flex';
+            }, FORCE_STOP_DELAY_MS);
+        }
+
+        function clearForceStopTimer(tab) {
+            if (tab._forceStopTimer) {
+                clearTimeout(tab._forceStopTimer);
+                tab._forceStopTimer = null;
+            }
+        }
+
+        function hideForceStopButton(tab) {
+            clearForceStopTimer(tab);
+            const btn = tab.toolbar && tab.toolbar.querySelector('.nb-force-stop');
+            if (btn) btn.style.display = 'none';
+        }
+
         function connectNotebookWs(tab) {
             const ws = new NotebookWebSocket(tab.id);
 
             ws.on('container_state', (msg) => {
                 updateContainerBadge(msg.status, msg.message);
                 if (msg.status === 'building') {
-                    showBuildLog(true, 'Building container image...');
+                    startBuildLog('Building container image...');
                 } else if (msg.status === 'starting') {
-                    showBuildLog(true, 'Starting container...');
+                    startBuildLog('Starting container...');
                     if (msg.message) appendBuildLog(msg.message);
                 } else if (msg.status === 'ready') {
                     appendBuildLog('Container ready.');
-                    setTimeout(() => showBuildLog(false), 1000);
-                    loadFileTree();
+                    setTimeout(() => endBuildLog(), 1000);
                     loadRepos();
                 } else if (msg.status === 'error') {
                     appendBuildLog('Error: ' + (msg.message || 'unknown'));
+                    // Keep overlay accessible on error so user can see what went wrong
                 }
             });
 
@@ -782,18 +1198,33 @@
                 const cell = tab.cells.get(msg.cell_id);
                 if (!cell) return;
                 if (msg.execution_state === 'running') {
+                    // Fresh execution (or reconnect replay): clear stale outputs.
+                    cell.outputEl.innerHTML = '';
+                    cell.pinnedEl.innerHTML = '';
+                    cell.monitors = {};
+                    cell._streamState = null;
+                    cell.outputWrap.style.display = 'none';
+                    cell.outputWrap.classList.add('collapsed');
                     cell.execCountEl.textContent = 'In [*]:';
                     cell.execCountEl.className = 'cell-exec-count running';
                     cell.el.className = 'cell running';
+                    clearForceStopTimer(tab);
                     tab._runningCellId = msg.cell_id;
                     tab.toolbar.querySelector('.nb-interrupt').style.display = 'inline-flex';
+                } else if (msg.execution_state === 'stopping') {
+                    cell.el.classList.add('stopping');
+                    cell.execCountEl.textContent = 'In [!]:';
+                    cell.execCountEl.className = 'cell-exec-count stopping';
+                    scheduleForceStopButton(tab, msg.cell_id);
                 } else {
                     if (msg.execution_count != null) cell.execCountEl.textContent = `In [${msg.execution_count}]:`;
                     cell.execCountEl.className = 'cell-exec-count';
                     cell.el.className = msg.execution_state === 'errored' ? 'cell errored' : 'cell completed';
+                    clearForceStopTimer(tab);
                     if (tab._runningCellId === msg.cell_id) {
                         tab._runningCellId = null;
                         tab.toolbar.querySelector('.nb-interrupt').style.display = 'none';
+                        hideForceStopButton(tab);
                     }
                 }
             });
@@ -813,6 +1244,17 @@
                 if (cell) appendCellDisplay(cell, msg);
             });
 
+            ws.on('created_dirs', (msg) => {
+                if (msg.dirs && msg.dirs.length) {
+                    // Cell wrote to /env/repos or /env/files. Refresh
+                    // repos, and refresh artifacts since /shared/artifacts
+                    // may also have grown.
+                    loadRepos();
+                    invalidateSharedPathCache('artifacts');
+                    loadSharedTree('artifacts');
+                }
+            });
+
             ws.on('error', (msg) => {
                 const cell = tab.cells.get(msg.cell_id);
                 if (cell) {
@@ -830,11 +1272,30 @@
                 }
             });
 
+            ws.on('resource_stats', (msg) => {
+                updateResourceBars(msg);
+            });
+
             tab.ws = ws;
             ws.connect();
         }
 
+        function logHasContent(cell) {
+            return cell.outputEl.children.length > 0 || cell.outputEl.textContent.trim().length > 0;
+        }
+
+        function pinnedHasContent(cell) {
+            return cell.pinnedEl.children.length > 0;
+        }
+
         function updateOutputToggle(cell) {
+            const hasLog = logHasContent(cell);
+            // Hide the toggle and log entirely when there's nothing in the
+            // log — monitor-only cells shouldn't show a dangling "0 lines".
+            cell.outputToggle.style.display = hasLog ? '' : 'none';
+            cell.outputEl.style.display = hasLog ? '' : 'none';
+            if (!hasLog) return;
+
             const collapsed = cell.outputWrap.classList.contains('collapsed');
             const lines = (cell.outputEl.textContent || '').split('\n').filter(l => l.trim()).length;
             if (collapsed) {
@@ -845,23 +1306,186 @@
         }
 
         function showCellOutput(cell) {
-            if (cell.outputEl.children.length > 0 || cell.outputEl.textContent.trim()) {
+            if (logHasContent(cell) || pinnedHasContent(cell)) {
                 cell.outputWrap.style.display = 'block';
                 updateOutputToggle(cell);
             }
         }
 
+        // Mini terminal state machine for cell output streams.
+        //
+        // tqdm and other libraries don't just use \r — when multiple bars
+        // are active (or leaked into tqdm._instances from earlier bars),
+        // they emit a multi-line refresh pattern: \n -> \r<bar> -> \x1b[A
+        // (newline down, write bar, cursor back up). Interpreting this
+        // correctly needs cursor tracking, not just \r handling.
+        //
+        // The state is a 2D "screen" buffer (array of line strings, cursor
+        // row+col). We honor \r \n \b and a subset of CSI sequences:
+        //   \x1b[nA  cursor up n (default 1)
+        //   \x1b[nB  cursor down n
+        //   \x1b[nC  cursor forward n
+        //   \x1b[nD  cursor back n
+        //   \x1b[K   erase in line (0=to end, 1=to start, 2=whole line)
+        // All other CSI sequences (colors, etc) are stripped.
+        const CSI_RE = /\x1b\[([\d;?]*)([a-zA-Z])/;
+
+        function newStreamState() {
+            return { lines: [''], row: 0, col: 0, el: null };
+        }
+
+        function ensureRow(state, row) {
+            while (state.lines.length <= row) state.lines.push('');
+        }
+
+        function writeCharAt(state, ch) {
+            ensureRow(state, state.row);
+            let line = state.lines[state.row];
+            if (state.col < line.length) {
+                state.lines[state.row] =
+                    line.slice(0, state.col) + ch + line.slice(state.col + 1);
+            } else {
+                // Pad with spaces if the cursor jumped past end-of-line.
+                state.lines[state.row] =
+                    line + ' '.repeat(state.col - line.length) + ch;
+            }
+            state.col++;
+        }
+
+        function handleCsi(state, params, final) {
+            const n = parseInt(params, 10);
+            const count = isNaN(n) ? 1 : Math.max(1, n);
+            switch (final) {
+                case 'A':
+                    state.row = Math.max(0, state.row - count);
+                    break;
+                case 'B':
+                    state.row += count;
+                    ensureRow(state, state.row);
+                    break;
+                case 'C':
+                    state.col += count;
+                    break;
+                case 'D':
+                    state.col = Math.max(0, state.col - count);
+                    break;
+                case 'K': {
+                    const mode = isNaN(n) ? 0 : n;
+                    ensureRow(state, state.row);
+                    const line = state.lines[state.row];
+                    if (mode === 0) {
+                        state.lines[state.row] = line.slice(0, state.col);
+                    } else if (mode === 1) {
+                        state.lines[state.row] =
+                            ' '.repeat(state.col) + line.slice(state.col);
+                    } else if (mode === 2) {
+                        state.lines[state.row] = '';
+                    }
+                    break;
+                }
+                // All other CSI sequences (colors, cursor positioning,
+                // SGR, show/hide cursor, etc) are intentionally ignored.
+            }
+        }
+
+        function processStreamChunk(state, text) {
+            // Normalize CRLF so \r doesn't spuriously wipe just-committed lines.
+            text = text.replace(/\r\n/g, '\n');
+
+            let i = 0;
+            while (i < text.length) {
+                const ch = text[i];
+                if (ch === '\x1b' && text[i + 1] === '[') {
+                    const m = text.slice(i).match(CSI_RE);
+                    if (m) {
+                        handleCsi(state, m[1], m[2]);
+                        i += m[0].length;
+                        continue;
+                    }
+                    // Incomplete CSI sequence at chunk tail — skip the ESC
+                    // and continue. (Chunks are always full JSON messages,
+                    // so partial-at-boundary is vanishingly rare.)
+                    i++;
+                    continue;
+                }
+
+                if (ch === '\n') {
+                    state.row++;
+                    state.col = 0;
+                    ensureRow(state, state.row);
+                } else if (ch === '\r') {
+                    state.col = 0;
+                } else if (ch === '\b') {
+                    if (state.col > 0) state.col--;
+                } else if (ch === '\x1b') {
+                    // Bare ESC not followed by [ — skip it.
+                } else {
+                    writeCharAt(state, ch);
+                }
+                i++;
+            }
+        }
+
+        function renderStreamState(state) {
+            // Trim leading blank lines — tqdm's \n \r<bar> \x1b[A pattern
+            // leaves row 0 empty as a phantom "space above the bar".
+            return state.lines.join('\n').replace(/^\n+/, '');
+        }
+
         function appendCellOutput(cell, type, content) {
             if (!content) return;
-            const last = cell.outputEl.lastElementChild;
-            if (last && last.tagName === 'PRE' && last.className === `output-${type}`) {
-                last.textContent += content;
-            } else {
+
+            // 'result' and 'error' are structured one-shots, not incremental
+            // line streams — bypass the state machine entirely.
+            if (type === 'result' || type === 'error') {
                 const pre = document.createElement('pre');
                 pre.className = `output-${type}`;
                 pre.textContent = content;
                 cell.outputEl.appendChild(pre);
+                showCellOutput(cell);
+                return;
             }
+
+            // Per-stream state lives on the cell so it survives across
+            // interleaves where a different stream's <pre> becomes the
+            // last child (e.g. stdout print() in the middle of a tqdm bar).
+            if (!cell._streamState) {
+                cell._streamState = {
+                    stdout: newStreamState(),
+                    stderr: newStreamState(),
+                };
+            }
+            const state = cell._streamState[type];
+            if (!state) {
+                // Unknown stream type — fall back to plain append.
+                const pre = document.createElement('pre');
+                pre.className = `output-${type}`;
+                pre.textContent = content;
+                cell.outputEl.appendChild(pre);
+                showCellOutput(cell);
+                return;
+            }
+
+            // If another stream has taken over the log's last child, the
+            // in-progress screen on our stream is no longer live. Freeze
+            // it into its <pre> and start a fresh screen — the next
+            // write will create a new <pre>.
+            const last = cell.outputEl.lastElementChild;
+            if (state.el && state.el !== last) {
+                state.el.textContent = renderStreamState(state);
+                cell._streamState[type] = newStreamState();
+            }
+
+            const active = cell._streamState[type];
+            processStreamChunk(active, content);
+
+            if (!active.el) {
+                active.el = document.createElement('pre');
+                active.el.className = `output-${type}`;
+                cell.outputEl.appendChild(active.el);
+            }
+            active.el.textContent = renderStreamState(active);
+
             showCellOutput(cell);
         }
 
@@ -890,7 +1514,7 @@
                 audio.src = url;
                 wrapper.appendChild(audio);
 
-                cell.outputEl.appendChild(wrapper);
+                cell.pinnedEl.appendChild(wrapper);
             }
             showCellOutput(cell);
         }
@@ -911,9 +1535,19 @@
                 title.textContent = (msg.config && msg.config.title) || 'Monitor';
                 container.appendChild(title);
 
+                // Canvas is hidden until the first data point arrives to
+                // avoid an oversized empty chart area while training is
+                // still warming up (data loaders, etc.). A compact
+                // placeholder hints at what we're waiting for.
+                const placeholder = document.createElement('div');
+                placeholder.className = 'monitor-placeholder';
+                placeholder.textContent = 'Waiting for first step...';
+                container.appendChild(placeholder);
+
                 const canvas = document.createElement('canvas');
                 canvas.className = 'monitor-canvas';
                 canvas.height = 200;
+                canvas.style.display = 'none';
                 container.appendChild(canvas);
 
                 const legend = document.createElement('div');
@@ -932,12 +1566,12 @@
                     container.appendChild(progressEl);
                 }
 
-                cell.outputEl.appendChild(container);
+                cell.pinnedEl.appendChild(container);
                 showCellOutput(cell);
 
                 cell.monitors[did] = {
                     container, canvas, ctx: canvas.getContext('2d'),
-                    legend, table, progressEl,
+                    placeholder, legend, table, progressEl,
                     series: {}, keyOrder: [],
                     config: msg.config || {}, lastStep: 0,
                 };
@@ -947,6 +1581,14 @@
                 if (!mon) return;
                 const step = msg.step;
                 const metrics = msg.metrics || {};
+
+                // First real data point: reveal the canvas, drop the
+                // "waiting" placeholder. From here on draws handle sizing.
+                if (mon.placeholder) {
+                    mon.placeholder.remove();
+                    mon.placeholder = null;
+                    mon.canvas.style.display = '';
+                }
 
                 for (const [key, value] of Object.entries(metrics)) {
                     if (!mon.series[key]) {
@@ -1112,23 +1754,43 @@
         }
 
         // =====================================================================
-        //  CLONE / INSTALL DIALOGS (unchanged logic)
+        //  CLONE / INSTALL (streams into build-log overlay with repo spinner)
         // =====================================================================
+        function setRepoInstalling(name, installing) {
+            if (installing) _installingRepos.add(name);
+            else _installingRepos.delete(name);
+            // Find the repo entry in the sidebar and toggle spinner
+            for (const el of repoList.querySelectorAll('.file-entry')) {
+                const nameEl = el.querySelector('.file-name');
+                if (!nameEl) continue;
+                // Compare just the repo name (text before any badge spans)
+                const repoText = nameEl.childNodes[0]?.textContent?.trim();
+                if (repoText !== name) continue;
+                el.classList.toggle('installing', installing);
+                if (installing && !el.querySelector('.repo-spinner')) {
+                    const sp = document.createElement('span');
+                    sp.className = 'repo-spinner';
+                    el.appendChild(sp);
+                } else if (!installing) {
+                    const sp = el.querySelector('.repo-spinner');
+                    if (sp) sp.remove();
+                }
+                break;
+            }
+        }
+
         async function streamInstall(name) {
-            const logEl = document.getElementById('install-log');
-            const is = document.getElementById('install-status');
-            logEl.style.display = 'block';
-            logEl.textContent = '';
-            is.style.display = 'block';
-            is.style.color = 'var(--accent-yellow)';
-            is.textContent = 'Running pip install -e ...';
+            setRepoInstalling(name, true);
+            buildLogTitle.textContent = `Installing ${name}...`;
+            buildLogContent.textContent = '';
+            setBuildLogVisible(true);
 
             try {
                 const url = `/api/environments/${envId}/repos/install-stream?repo_name=${encodeURIComponent(name)}`;
                 const res = await fetch(url);
                 if (!res.ok) {
-                    is.style.color = 'var(--accent-red)';
-                    is.textContent = 'Installation failed.';
+                    appendBuildLog('Installation failed.');
+                    setRepoInstalling(name, false);
                     return false;
                 }
                 const reader = res.body.getReader();
@@ -1136,26 +1798,52 @@
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    logEl.textContent += decoder.decode(value, { stream: true });
-                    logEl.scrollTop = logEl.scrollHeight;
+                    // Stream chunks already contain newlines, append directly
+                    buildLogContent.textContent += decoder.decode(value, { stream: true });
+                    buildLogContent.scrollTop = buildLogContent.scrollHeight;
                 }
-                is.style.color = 'var(--accent-green)';
-                is.textContent = 'Installed successfully. Package is now importable.';
+                appendBuildLog('Installed successfully. Package is now importable.');
+                setRepoInstalling(name, false);
                 return true;
             } catch (e) {
-                is.style.color = 'var(--accent-red)';
-                is.textContent = 'Installation failed.';
+                appendBuildLog('Installation failed.');
+                setRepoInstalling(name, false);
                 return false;
             }
         }
 
         async function doInstallRepo(name) {
-            document.getElementById('install-dialog').style.display = 'flex';
-            document.getElementById('install-message').textContent = `Installing "${name}"...`;
-            document.getElementById('install-markers').textContent = '';
-            document.getElementById('install-run').style.display = 'none';
-            document.getElementById('install-skip').textContent = 'Close';
-            await streamInstall(name);
+            // Skip prompt dialog, go straight to install via overlay
+            streamInstall(name);
+        }
+
+        async function doPullRepo(name) {
+            setRepoInstalling(name, true);
+            buildLogTitle.textContent = `Pulling ${name}...`;
+            buildLogContent.textContent = '';
+            setBuildLogVisible(true);
+
+            try {
+                const url = `/api/environments/${envId}/repos/pull-stream?repo_name=${encodeURIComponent(name)}`;
+                const res = await fetch(url);
+                if (!res.ok) {
+                    appendBuildLog('Pull failed.');
+                    setRepoInstalling(name, false);
+                    return;
+                }
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buildLogContent.textContent += decoder.decode(value, { stream: true });
+                    buildLogContent.scrollTop = buildLogContent.scrollHeight;
+                }
+                appendBuildLog('Pull complete.');
+            } catch (e) {
+                appendBuildLog('Pull failed.');
+            }
+            setRepoInstalling(name, false);
         }
 
         const cloneDialog = document.getElementById('clone-dialog');
@@ -1192,40 +1880,24 @@
         function showInstallPrompt(repoName, project) {
             const msg = document.getElementById('install-message');
             const markers = document.getElementById('install-markers');
-            const is = document.getElementById('install-status');
-            const logEl = document.getElementById('install-log');
             const runBtn = document.getElementById('install-run');
             const skipBtn = document.getElementById('install-skip');
             msg.textContent = `"${repoName}" is installable. Install as editable package?`;
             markers.textContent = 'Found: ' + project.markers_found.join(', ');
-            is.style.display = 'none'; logEl.style.display = 'none';
             runBtn.style.display = 'inline-flex'; runBtn.disabled = false;
             runBtn.textContent = 'Install as Editable Package'; skipBtn.textContent = 'Skip';
             document.getElementById('install-dialog').style.display = 'flex';
-            runBtn.onclick = async () => {
-                runBtn.disabled = true; runBtn.textContent = 'Installing...';
-                const ok = await streamInstall(repoName);
-                if (ok) { runBtn.style.display = 'none'; skipBtn.textContent = 'Done'; }
-                else { runBtn.disabled = false; runBtn.textContent = 'Retry'; }
+            runBtn.onclick = () => {
+                document.getElementById('install-dialog').style.display = 'none';
+                streamInstall(repoName);
             };
         }
         document.getElementById('install-skip').addEventListener('click', () => { document.getElementById('install-dialog').style.display = 'none'; });
         document.getElementById('install-dialog').addEventListener('click', (e) => { if (e.target.id === 'install-dialog') e.target.style.display = 'none'; });
 
         // =====================================================================
-        //  TOOLBAR: FILES / ENV / NOTEBOOK DIALOG
+        //  TOOLBAR: ENV / NOTEBOOK DIALOG
         // =====================================================================
-        document.getElementById('btn-new-file').addEventListener('click', async () => {
-            const name = prompt('File name (e.g. utils.py):');
-            if (!name) return;
-            await api.put(`/api/environments/${envId}/files/write`, { path:name, content:'' });
-            await loadFileTree(); openFileTab(name);
-        });
-        document.getElementById('btn-new-dir').addEventListener('click', async () => {
-            const name = prompt('Directory name:'); if (!name) return;
-            await api.post(`/api/environments/${envId}/files/mkdir`, { path:name }); loadFileTree();
-        });
-        document.getElementById('btn-refresh-files').addEventListener('click', () => { loadFileTree(); loadRepos(); });
 
         titleInput.addEventListener('change', async () => {
             const n = titleInput.value.trim();

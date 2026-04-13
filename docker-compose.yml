@@ -1,11 +1,20 @@
 services:
-  # Build the executor base image used by notebook containers
+  # Build the executor base images used by notebook containers
   executor-base:
     build:
       context: .
       dockerfile: src/executor/Dockerfile
       target: cpu
     image: jupyter-redux-base:latest
+    entrypoint: ["true"]
+    restart: "no"
+
+  executor-base-gpu:
+    build:
+      context: .
+      dockerfile: src/executor/Dockerfile
+      target: gpu
+    image: jupyter-redux-base:py3.11-gpu
     entrypoint: ["true"]
     restart: "no"
 
@@ -16,13 +25,32 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
+      # Shared bind mounts — mounted read-only into the backend so it
+      # can list their contents without needing the env container to
+      # be running. Writes happen inside env containers which have
+      # these same paths mounted read-write.
+      - ${JREDUX_DATASETS_PATH:-${HOME}/jupyter-redux/datasets}:/shared/datasets:ro
+      - ${JREDUX_ARTIFACTS_PATH:-${HOME}/jupyter-redux/artifacts}:/shared/artifacts:ro
     environment:
       - JREDUX_DOCKER_NETWORK=jredux
       - JREDUX_GPU_ENABLED=${JREDUX_GPU_ENABLED:-true}
+      - JREDUX_HF_TOKEN=${JREDUX_HF_TOKEN:-}
+      # Host uid/gid that env containers drop privileges to, so files
+      # written into /shared/artifacts are owned by the host user.
+      # Override in .env or the shell environment if your uid isn't 1000.
+      - JREDUX_HOST_UID=${JREDUX_HOST_UID:-1000}
+      - JREDUX_HOST_GID=${JREDUX_HOST_GID:-1000}
+      # Absolute *host* paths bind-mounted into every env container.
+      # These must exist on the host before starting — run
+      # scripts/init-shared.sh once to create them.
+      - JREDUX_DATASETS_PATH=${JREDUX_DATASETS_PATH:-${HOME}/jupyter-redux/datasets}
+      - JREDUX_ARTIFACTS_PATH=${JREDUX_ARTIFACTS_PATH:-${HOME}/jupyter-redux/artifacts}
     networks:
       - jredux
     depends_on:
       executor-base:
+        condition: service_completed_successfully
+      executor-base-gpu:
         condition: service_completed_successfully
 
 networks:

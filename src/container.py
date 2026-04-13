@@ -24,6 +24,67 @@ logger = logging.getLogger(__name__)
 CONTAINER_PREFIX = "jredux-env"
 VOLUME_PREFIX = "jredux-env"
 
+# Named docker volumes for tool caches shared across all env containers.
+# Mounted at the target user's ~/.cache path so HuggingFace, pip, and
+# torch find their cache without extra env vars.
+CACHE_HF_VOLUME = "jredux-cache-hf"
+CACHE_PIP_VOLUME = "jredux-cache-pip"
+CACHE_TORCH_VOLUME = "jredux-cache-torch"
+
+
+def _parse_nvidia_smi_csv(text: str) -> tuple[int, int, int, bool, bool]:
+    """Parse nvidia-smi CSV (memory.used, memory.total, utilization.gpu).
+
+    Returns (used_mib, total_mib, max_util_pct, mem_supported, saw_any_line).
+    ``mem_supported`` is False on unified-memory devices (e.g. GB10)
+    where memory columns come back as ``[N/A]``.
+    """
+    used_mib = 0
+    total_mib = 0
+    mem_supported = False
+    max_util = 0
+    saw_any_line = False
+    for raw in text.splitlines():
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 3:
+            continue
+        saw_any_line = True
+        try:
+            util = int(parts[2])
+            if util > max_util:
+                max_util = util
+        except ValueError:
+            pass
+        try:
+            used_mib += int(parts[0])
+            total_mib += int(parts[1])
+            mem_supported = True
+        except ValueError:
+            pass
+    return used_mib, total_mib, max_util, mem_supported, saw_any_line
+
+
+def _compute_cpu_pct(stats: dict) -> float:
+    """CPU% from a single docker stats snapshot, normalized to 0–100.
+
+    The snapshot includes both ``cpu_stats`` and ``precpu_stats``; the
+    delta between them covers roughly the sampling window. 100 = every
+    online core fully pegged.
+    """
+    cpu = stats.get("cpu_stats") or {}
+    pre = stats.get("precpu_stats") or {}
+    cpu_delta = (
+        (cpu.get("cpu_usage") or {}).get("total_usage", 0)
+        - (pre.get("cpu_usage") or {}).get("total_usage", 0)
+    )
+    system_delta = (
+        cpu.get("system_cpu_usage", 0)
+        - pre.get("system_cpu_usage", 0)
+    )
+    if system_delta <= 0 or cpu_delta <= 0:
+        return 0.0
+    return (cpu_delta / system_delta) * 100.0
+
 
 class ContainerService:
     def __init__(self) -> None:
@@ -84,6 +145,55 @@ class ContainerService:
         )
         return tag, stream
 
+    def _ensure_volume(self, vol_name: str) -> None:
+        try:
+            self.client.volumes.get(vol_name)
+        except docker.errors.NotFound:
+            self.client.volumes.create(vol_name)
+
+    def _build_env_vars(self) -> dict:
+        env_vars = {
+            "PYTHONPATH": "/env/lib:/env/files",
+            "JREDUX_HOST_UID": str(settings.host_uid),
+            "JREDUX_HOST_GID": str(settings.host_gid),
+        }
+        if settings.hf_token:
+            env_vars["HF_TOKEN"] = settings.hf_token
+        return env_vars
+
+    def _build_volumes(self, env_volume: str) -> dict:
+        """Assemble the volume/bind mount mapping for a fresh env container.
+
+        Per-env volume + tool caches as named docker volumes, plus
+        shared host bind mounts for datasets (read-only) and artifacts
+        (read-write). Missing host paths are skipped silently.
+        """
+        for vol in (CACHE_HF_VOLUME, CACHE_PIP_VOLUME, CACHE_TORCH_VOLUME):
+            self._ensure_volume(vol)
+
+        volumes: dict = {
+            env_volume: {"bind": "/env", "mode": "rw"},
+            CACHE_HF_VOLUME: {
+                "bind": "/home/jredux/.cache/huggingface", "mode": "rw",
+            },
+            CACHE_PIP_VOLUME: {
+                "bind": "/home/jredux/.cache/pip", "mode": "rw",
+            },
+            CACHE_TORCH_VOLUME: {
+                "bind": "/home/jredux/.cache/torch", "mode": "rw",
+            },
+        }
+
+        if settings.datasets_path is not None:
+            host_ds = str(settings.datasets_path)
+            volumes[host_ds] = {"bind": "/shared/datasets", "mode": "ro"}
+
+        if settings.artifacts_path is not None:
+            host_art = str(settings.artifacts_path)
+            volumes[host_art] = {"bind": "/shared/artifacts", "mode": "rw"}
+
+        return volumes
+
     def create_container(
         self,
         environment_id: str,
@@ -94,11 +204,7 @@ class ContainerService:
         vol_name = self._volume_name(environment_id)
 
         try:
-            # Create volume if it doesn't exist
-            try:
-                self.client.volumes.get(vol_name)
-            except docker.errors.NotFound:
-                self.client.volumes.create(vol_name)
+            self._ensure_volume(vol_name)
 
             image = self.get_image_tag(python_version, gpu)
 
@@ -106,12 +212,9 @@ class ContainerService:
                 "image": image,
                 "name": name,
                 "detach": True,
-                "volumes": {
-                    vol_name: {"bind": "/env", "mode": "rw"},
-                },
-                "environment": {
-                    "PYTHONPATH": "/env/lib:/env/files",
-                },
+                "shm_size": "8g",
+                "volumes": self._build_volumes(vol_name),
+                "environment": self._build_env_vars(),
             }
 
             if settings.docker_network:
@@ -202,6 +305,34 @@ class ContainerService:
             return ContainerState(
                 status=ContainerStatus.ERROR,
                 error_message=f"Failed to stop container: {e.explanation}",
+            )
+
+    def restart_container(self, environment_id: str) -> ContainerState:
+        """Hard-restart the env container (SIGKILL + start).
+
+        Used for 'Force Stop' — when a cell's user code is stuck in a
+        C-bound call that the cooperative interrupt can't reach. The
+        timeout=0 bypasses the SIGTERM grace period and jumps straight
+        to SIGKILL so we stop immediately. All notebook namespace is
+        lost; the caller is responsible for telling the user.
+        """
+        name = self.get_container_name(environment_id)
+        try:
+            container = self.client.containers.get(name)
+            container.restart(timeout=0)
+            container.reload()
+            host_port = self._get_host_port(container)
+            return ContainerState(
+                status=ContainerStatus.READY,
+                container_id=container.id,
+                host_port=host_port,
+            )
+        except docker.errors.NotFound:
+            return ContainerState(status=ContainerStatus.NONE)
+        except docker.errors.APIError as e:
+            return ContainerState(
+                status=ContainerStatus.ERROR,
+                error_message=f"Failed to restart container: {e.explanation}",
             )
 
     def destroy_container(self, environment_id: str) -> None:
@@ -498,6 +629,41 @@ class ContainerService:
         for chunk in stream:
             yield chunk.decode(errors="replace")
 
+    def pull_repo_stream(
+        self, environment_id: str, repo_name: str,
+    ):
+        """Run git fetch origin + git reset --hard, yielding output chunks."""
+        container = self._get_running_container(environment_id)
+        dest = f"{self.REPOS_ROOT}/{repo_name}"
+
+        exit_code, _ = container.exec_run(["test", "-d", dest])
+        if exit_code != 0:
+            raise FileNotFoundError(f"Repo '{repo_name}' not found")
+
+        # Unshallow if needed (clones use --depth 1)
+        exit_code, _ = container.exec_run(
+            ["git", "-C", dest, "rev-parse", "--is-shallow-repository"],
+        )
+        is_shallow = (
+            exit_code == 0
+            and _.decode(errors="replace").strip() == "true"
+        )
+
+        if is_shallow:
+            _, stream = container.exec_run(
+                ["git", "-C", dest, "fetch", "--unshallow", "origin"],
+                stream=True,
+            )
+            for chunk in stream:
+                yield chunk.decode(errors="replace")
+
+        _, stream = container.exec_run(
+            ["git", "-C", dest, "pull", "--ff-only"],
+            stream=True,
+        )
+        for chunk in stream:
+            yield chunk.decode(errors="replace")
+
     def list_repos(self, environment_id: str) -> list[dict]:
         """List cloned repos under /env/repos/."""
         container = self._get_running_container(environment_id)
@@ -548,6 +714,85 @@ class ContainerService:
 
     def record_activity(self, environment_id: str) -> None:
         self._last_activity[environment_id] = time.time()
+
+    # -----------------------------------------------------------------
+    #  Resource stats (CPU / memory / GPU)
+    # -----------------------------------------------------------------
+
+    def get_container_stats(self, environment_id: str) -> dict | None:
+        """Return {cpu_pct, mem_used, mem_total} for the env's container.
+
+        cpu_pct is normalized to [0, 100] across all cores (so 100 means
+        every core is pegged). None if the container isn't running.
+        """
+        name = self.get_container_name(environment_id)
+        try:
+            container = self.client.containers.get(name)
+        except docker.errors.NotFound:
+            return None
+        if container.status != "running":
+            return None
+
+        try:
+            stats = container.stats(stream=False)
+        except Exception:
+            logger.debug("stats() failed for %s", name, exc_info=True)
+            return None
+
+        cpu_pct = _compute_cpu_pct(stats)
+        mem = stats.get("memory_stats") or {}
+        mem_used = int(mem.get("usage") or 0)
+        mem_total = int(mem.get("limit") or 0)
+        return {
+            "cpu_pct": round(cpu_pct, 1),
+            "mem_used": mem_used,
+            "mem_total": mem_total,
+        }
+
+    def get_gpu_stats(self, environment_id: str) -> dict | None:
+        """Aggregate GPU stats from nvidia-smi inside the container.
+
+        Returns {util_pct, mem_used, mem_total} aggregated across all
+        GPUs visible to the container. `mem_used`/`mem_total` can be
+        None on unified-memory devices (e.g. Grace Blackwell / GB10)
+        that don't expose a separate VRAM pool — in that case only
+        `util_pct` is meaningful. None if nvidia-smi isn't available
+        at all (CPU-only container, missing driver).
+        """
+        name = self.get_container_name(environment_id)
+        try:
+            container = self.client.containers.get(name)
+        except docker.errors.NotFound:
+            return None
+        if container.status != "running":
+            return None
+
+        try:
+            result = container.exec_run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.used,memory.total,utilization.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                demux=False,
+            )
+        except Exception:
+            return None
+
+        if result.exit_code != 0 or not result.output:
+            return None
+
+        text = result.output.decode("utf-8", errors="replace")
+        used_mib, total_mib, max_util, mem_supported, saw_any = (
+            _parse_nvidia_smi_csv(text)
+        )
+        if not saw_any:
+            return None
+        return {
+            "util_pct": max_util,
+            "mem_used": used_mib * 1024 * 1024 if mem_supported else None,
+            "mem_total": total_mib * 1024 * 1024 if mem_supported else None,
+        }
 
     async def start_idle_monitor(self) -> None:
         self._idle_task = asyncio.create_task(self._idle_monitor_loop())

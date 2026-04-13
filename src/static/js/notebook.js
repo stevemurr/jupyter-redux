@@ -123,6 +123,11 @@ class NotebookEditor {
         this.ws.on('state', (msg) => {
             const cell = this.cells.get(msg.cell_id);
             if (cell) {
+                if (msg.execution_state === 'running') {
+                    // Fresh execution (or replay): clear stale outputs so
+                    // the message stream renders cleanly.
+                    cell.clearOutputs();
+                }
                 cell.setExecutionState(msg.execution_state, msg.execution_count);
                 if (msg.execution_state === 'running') {
                     this.executingCellId = msg.cell_id;

@@ -13,6 +13,7 @@ from src.models import (
     Environment,
     EnvironmentIndex,
     EnvironmentSummary,
+    ExecutionState,
     Notebook,
     NotebookIndex,
     NotebookSummary,
@@ -193,6 +194,32 @@ class EnvironmentService:
         index = self._load_nb_index()
         filtered = [n for n in index.notebooks if n.environment_id == environment_id]
         return NotebookIndex(notebooks=filtered)
+
+    def clear_stale_running_cells(self) -> int:
+        """Reset any persisted RUNNING cells to ERRORED.
+
+        Called once at backend startup. Any cell marked running in
+        the on-disk state must have been interrupted by the backend
+        restart — the execution can't possibly still be in flight
+        because the ExecutionManager is in-memory only. We don't
+        want these cells to render as "running forever" with a dead
+        Stop button, so we rewrite their state eagerly.
+        """
+        index = self._load_nb_index()
+        touched = 0
+        for summary in index.notebooks:
+            notebook = self.get_notebook(summary.id)
+            if notebook is None:
+                continue
+            changed = False
+            for cell in notebook.cells:
+                if cell.execution_state == ExecutionState.RUNNING:
+                    cell.execution_state = ExecutionState.ERRORED
+                    changed = True
+                    touched += 1
+            if changed:
+                self.save_notebook(notebook)
+        return touched
 
     # --- Cell operations ---
 

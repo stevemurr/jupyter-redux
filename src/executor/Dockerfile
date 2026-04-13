@@ -4,19 +4,21 @@ ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim AS cpu
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git && \
+    apt-get install -y --no-install-recommends git gosu && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
 
-RUN mkdir -p /env/lib /env/files /env/repos
+RUN mkdir -p /env/lib /env/files /env/repos /home/jredux
 
 COPY src/executor/server.py /opt/executor/server.py
+COPY src/executor/entrypoint.sh /opt/executor/entrypoint.sh
+RUN chmod +x /opt/executor/entrypoint.sh
 
 EXPOSE 9999
 
-CMD ["python", "/opt/executor/server.py"]
+ENTRYPOINT ["/opt/executor/entrypoint.sh"]
 
 # --- GPU variant ---
 # Build with: docker build --target gpu --build-arg PYTHON_VERSION=3.11 -t jupyter-redux-base:py3.11-gpu -f src/executor/Dockerfile .
@@ -27,7 +29,7 @@ ARG PYTHON_VERSION=3.11
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        software-properties-common gpg-agent git && \
+        software-properties-common gpg-agent git gosu && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -40,10 +42,12 @@ RUN apt-get update && \
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
 
-RUN mkdir -p /env/lib /env/files /env/repos
+RUN mkdir -p /env/lib /env/files /env/repos /home/jredux
 
 COPY src/executor/server.py /opt/executor/server.py
+COPY src/executor/entrypoint.sh /opt/executor/entrypoint.sh
+RUN chmod +x /opt/executor/entrypoint.sh
 
 EXPOSE 9999
 
-CMD ["python", "/opt/executor/server.py"]
+ENTRYPOINT ["/opt/executor/entrypoint.sh"]

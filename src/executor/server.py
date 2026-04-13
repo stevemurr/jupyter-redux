@@ -9,7 +9,6 @@ import json
 import mimetypes
 import os
 import re
-import signal
 import socket
 import subprocess
 import sys
@@ -26,6 +25,76 @@ namespaces: dict[str, dict] = {}
 current_thread: threading.Thread | None = None
 # Reference to the current connection for display functions
 _current_conn: socket.socket | None = None
+# Serializes writes to the client socket — the exec thread (stdout/stderr,
+# displays) and the interrupt cascade daemon can both call send_message.
+_send_lock = threading.Lock()
+# Thread ids that existed before user code started running. Used by the
+# interrupt cascade to identify "child" threads spawned by user code so
+# we can post KeyboardInterrupt to them as well.
+_exec_baseline_thread_ids: set[int] = set()
+
+# ---------------------------------------------------------------------------
+#  Directory creation tracking
+# ---------------------------------------------------------------------------
+_created_dirs: set[str] = set()
+_created_dirs_lock = threading.Lock()
+
+# Only track directories created under these roots
+_TRACKED_ROOTS = ("/env/files", "/env/repos")
+
+# Directories created by libraries/runtime that we don't care about
+_DIR_BLOCKLIST = {
+    "__pycache__", ".git", ".hg", ".svn",
+    "node_modules", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".tox", ".nox",
+}
+
+_original_os_mkdir = os.mkdir
+_original_os_makedirs = os.makedirs
+_original_path_mkdir = __import__("pathlib").Path.mkdir
+
+
+def _should_track(abspath):
+    basename = os.path.basename(abspath)
+    if basename in _DIR_BLOCKLIST:
+        return False
+    return any(abspath.startswith(r + "/") or abspath == r for r in _TRACKED_ROOTS)
+
+
+def _tracking_os_mkdir(path, *args, **kwargs):
+    _original_os_mkdir(path, *args, **kwargs)
+    abspath = os.path.abspath(path)
+    if _should_track(abspath):
+        with _created_dirs_lock:
+            _created_dirs.add(abspath)
+
+
+def _tracking_os_makedirs(name, *args, **kwargs):
+    _original_os_makedirs(name, *args, **kwargs)
+    abspath = os.path.abspath(name)
+    if _should_track(abspath):
+        with _created_dirs_lock:
+            _created_dirs.add(abspath)
+
+
+def _tracking_path_mkdir(self, *args, **kwargs):
+    _original_path_mkdir(self, *args, **kwargs)
+    abspath = str(self.resolve())
+    if _should_track(abspath):
+        with _created_dirs_lock:
+            _created_dirs.add(abspath)
+
+
+os.mkdir = _tracking_os_mkdir
+os.makedirs = _tracking_os_makedirs
+__import__("pathlib").Path.mkdir = _tracking_path_mkdir
+
+
+def _drain_created_dirs() -> list[str]:
+    with _created_dirs_lock:
+        dirs = sorted(_created_dirs)
+        _created_dirs.clear()
+    return dirs
 
 
 def _get_namespace(notebook_id: str = "") -> dict:
@@ -37,8 +106,9 @@ def _get_namespace(notebook_id: str = "") -> dict:
 
 
 def send_message(conn: socket.socket, msg: dict) -> None:
-    data = json.dumps(msg) + "\n"
-    conn.sendall(data.encode("utf-8"))
+    data = (json.dumps(msg) + "\n").encode("utf-8")
+    with _send_lock:
+        conn.sendall(data)
 
 
 AUDIO_MIMES = {
@@ -93,7 +163,18 @@ def display_audio(path: str, mime: str | None = None) -> None:
 
 
 class StreamingWriter:
-    """File-like object that sends each write() over the socket immediately."""
+    """File-like object that sends each write() over the socket immediately.
+
+    Reports isatty() as True so that libraries like tqdm use their
+    \\r-overwrite progress-bar mode instead of emitting one line per
+    update. The frontend stream processor interprets \\r and strips
+    ANSI escape sequences. This does mean other libraries will emit
+    ANSI color codes (we drop them), losing terminal color — worth it
+    for readable progress bars.
+    """
+
+    # tqdm and other libraries introspect these on a TTY-like stream.
+    encoding = "utf-8"
 
     def __init__(self, conn: socket.socket, stream: str) -> None:
         self._conn = conn
@@ -110,6 +191,9 @@ class StreamingWriter:
 
     def flush(self) -> None:
         pass
+
+    def isatty(self) -> bool:
+        return True
 
     def fileno(self) -> int:
         raise OSError("StreamingWriter has no fileno")
@@ -225,21 +309,26 @@ REPOS_DIR = "/env/repos"
 
 
 def _refresh_pth_paths() -> None:
-    """Re-process .pth files from site-packages so editable installs
-    done after the executor started are visible on sys.path."""
-    import glob
+    """Re-process .pth files so editable installs done after the
+    executor started are importable.
+
+    Modern editable installs (PEP 660, setuptools >= 64) use .pth
+    files whose content is a Python ``import`` statement that
+    registers a custom finder on ``sys.meta_path`` — not a plain
+    directory path. ``site.addsitedir`` correctly handles both
+    styles: it execs import lines and appends directory lines to
+    sys.path. The previous manual os.path.isdir check silently
+    skipped the import-style files.
+    """
+    import importlib
     import site
 
     for sp_dir in site.getsitepackages():
-        for pth in glob.glob(os.path.join(sp_dir, "*.pth")):
-            try:
-                for line in open(pth):
-                    line = line.strip()
-                    if line and not line.startswith("#") and os.path.isdir(line):
-                        if line not in sys.path:
-                            sys.path.insert(0, line)
-            except OSError:
-                pass
+        try:
+            site.addsitedir(sp_dir)
+        except Exception:
+            pass
+    importlib.invalidate_caches()
 
 
 def _invalidate_user_modules() -> None:
@@ -479,9 +568,17 @@ def _extract_metrics(line, custom_patterns):
 
 def execute_code(
     conn: socket.socket, code: str, notebook_id: str = "",
-) -> None:
-    global _current_conn
+) -> bool:
+    """Run user code. Returns True if an exception was raised (including
+    KeyboardInterrupt from an interrupt), False on clean completion."""
+    global _current_conn, _exec_baseline_thread_ids
     _current_conn = conn
+    # Snapshot live thread ids before user code runs. Any thread still
+    # alive on interrupt whose id is NOT in this set was spawned by user
+    # code and is fair game for the interrupt cascade.
+    _exec_baseline_thread_ids = {
+        t.ident for t in threading.enumerate() if t.ident is not None
+    }
     ns = _get_namespace(notebook_id)
     ns["display_audio"] = display_audio
     ns["Monitor"] = Monitor
@@ -489,6 +586,7 @@ def execute_code(
 
     old_stdout = sys.stdout
     old_stderr = sys.stderr
+    errored = False
 
     try:
         sys.stdout = StreamingWriter(conn, "stdout")
@@ -505,6 +603,7 @@ def execute_code(
             exec(code, ns)  # noqa: S102
 
     except KeyboardInterrupt:
+        errored = True
         send_message(conn, {
             "type": "error",
             "ename": "KeyboardInterrupt",
@@ -512,6 +611,7 @@ def execute_code(
             "traceback": ["KeyboardInterrupt"],
         })
     except Exception as e:
+        errored = True
         send_message(conn, {
             "type": "error",
             "ename": type(e).__name__,
@@ -521,6 +621,7 @@ def execute_code(
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+    return errored
 
 
 def handle_message(conn: socket.socket, msg: dict) -> None:
@@ -530,6 +631,7 @@ def handle_message(conn: socket.socket, msg: dict) -> None:
         notebook_id = msg.get("notebook_id", "")
         send_message(conn, {"type": "state", "execution_state": "running"})
 
+        errored = False
         if is_pip_command(code):
             stripped = code.strip()
             if stripped.startswith("pip install"):
@@ -546,22 +648,111 @@ def handle_message(conn: socket.socket, msg: dict) -> None:
         elif is_shell_command(code):
             execute_shell(conn, code[1:].strip())
         else:
-            execute_code(conn, code, notebook_id)
+            errored = execute_code(conn, code, notebook_id)
 
-        send_message(conn, {"type": "state", "execution_state": "completed"})
+        created = _drain_created_dirs()
+        if created:
+            send_message(conn, {"type": "created_dirs", "dirs": created})
 
-    elif msg_type == "interrupt":
-        if current_thread and current_thread.is_alive():
-            signal.raise_signal(signal.SIGINT)
+        final_state = "errored" if errored else "completed"
+        send_message(conn, {"type": "state", "execution_state": final_state})
 
     elif msg_type == "ping":
         send_message(conn, {"type": "pong"})
 
 
-def handle_client(conn: socket.socket, addr: tuple) -> None:
+def _set_async_exc(tid: int, exc=KeyboardInterrupt) -> None:
+    """Post an async exception to a Python thread by ident.
+
+    This is the only reliable way to interrupt a non-main CPython
+    thread. The exception fires at the next Python bytecode boundary
+    in that thread — stuck C extension calls still need to return
+    before it takes effect.
+    """
+    import ctypes
+    if tid is None:
+        return
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(tid), ctypes.py_object(exc),
+    )
+    if res > 1:
+        # Defensive: unwind if more than one thread was affected.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_ulong(tid), None,
+        )
+
+
+def _interrupt_targets(exec_thread) -> list[int]:
+    """Return (exec_thread, plus any threads spawned during this run)."""
+    targets = []
+    if exec_thread.ident is not None:
+        targets.append(exec_thread.ident)
+    for t in threading.enumerate():
+        tid = t.ident
+        if tid is None or tid == exec_thread.ident:
+            continue
+        if tid in _exec_baseline_thread_ids:
+            continue
+        targets.append(tid)
+    return targets
+
+
+def _start_interrupt_cascade(exec_thread, timeout_s: float = 5.0) -> None:
+    """Repeatedly post KeyboardInterrupt to the exec thread and any
+    threads user code spawned during this run. Runs as a daemon so
+    the client message loop stays responsive for force_stop.
+
+    This is a cooperative interrupt: the async exception fires at
+    the next Python bytecode boundary in the target thread. If the
+    thread is stuck in a long C call (nanosleep, a big torch kernel,
+    queue.get on a lock), the exception stays pending until the C
+    call returns. Users can escalate to Force Stop if the wait is
+    unacceptable.
+
+    Note: we deliberately do NOT pthread_kill with SIGINT. CPython
+    handles signals only on the main thread, so a worker's nanosleep
+    is not woken by SIGINT, and worse, the signal may be picked up
+    by the executor's main accept() loop and crash the server.
+    """
+    def _cascade() -> None:
+        deadline = time.monotonic() + timeout_s
+        while exec_thread.is_alive() and time.monotonic() < deadline:
+            for tid in _interrupt_targets(exec_thread):
+                _set_async_exc(tid)
+            time.sleep(0.2)
+
+    threading.Thread(target=_cascade, daemon=True).start()
+
+
+def _dispatch_msg(conn, msg, exec_thread):
+    """Route a parsed message, returning the (possibly new) exec_thread."""
     global current_thread
+    msg_type = msg.get("type")
+
+    if msg_type == "interrupt":
+        if exec_thread and exec_thread.is_alive():
+            _start_interrupt_cascade(exec_thread)
+        return exec_thread
+
+    if msg_type == "execute":
+        if exec_thread and exec_thread.is_alive():
+            exec_thread.join()
+        t = threading.Thread(
+            target=handle_message, args=(conn, msg), daemon=True,
+        )
+        current_thread = t
+        t.start()
+        return t
+
+    handle_message(conn, msg)
+    return exec_thread
+
+
+def handle_client(conn: socket.socket, addr: tuple) -> None:
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     buffer = ""
+    exec_thread = None
+
     try:
         while True:
             data = conn.recv(BUFFER_SIZE)
@@ -571,16 +762,22 @@ def handle_client(conn: socket.socket, addr: tuple) -> None:
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 if line.strip():
-                    msg = json.loads(line)
-                    current_thread = threading.current_thread()
-                    handle_message(conn, msg)
+                    exec_thread = _dispatch_msg(
+                        conn, json.loads(line), exec_thread,
+                    )
     except (ConnectionResetError, BrokenPipeError):
         pass
     finally:
+        if exec_thread and exec_thread.is_alive():
+            exec_thread.join(timeout=2)
         conn.close()
 
 
 def main() -> None:
+    # Set CWD so relative paths from user code land in /env/files
+    _original_os_makedirs("/env/files", exist_ok=True)
+    os.chdir("/env/files")
+
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))

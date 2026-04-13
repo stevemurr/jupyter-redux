@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +37,17 @@ from src.models import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Reset any cells that were left in the "running" state from a
+    # previous backend process — the ExecutionManager is in-memory so
+    # those executions can't actually still be in flight.
+    from src.environment import EnvironmentService
+    stale = EnvironmentService().clear_stale_running_cells()
+    if stale:
+        import logging
+        logging.getLogger(__name__).info(
+            "Reset %d stale running cell(s) to errored on startup", stale,
+        )
+
     csvc = _get_container_service()
     await csvc.start_idle_monitor()
     yield
@@ -193,6 +205,7 @@ async def update_environment(
     return _build_env_response(env, notebooks.notebooks, container_state)
 
 
+
 @app.delete("/api/environments/{env_id}", status_code=204)
 async def delete_environment(env_id: str) -> None:
     svc = _get_env_service()
@@ -327,6 +340,53 @@ async def rename_file(
     return {"old_path": req.old_path, "new_path": req.new_path}
 
 
+# --- Shared dir browsing (read-only) ---
+
+_SHARED_ROOTS = {
+    "datasets": Path("/shared/datasets"),
+    "artifacts": Path("/shared/artifacts"),
+}
+
+
+@app.get("/api/shared/{root}", response_model=FileTreeResponse)
+async def list_shared_tree(root: str) -> FileTreeResponse:
+    """Walk /shared/datasets or /shared/artifacts and return the tree.
+
+    These host directories are bind-mounted into the backend container
+    read-only, so listing happens directly without going through an
+    env container. That means users can browse them even when no env
+    container is running.
+    """
+    base = _SHARED_ROOTS.get(root)
+    if base is None:
+        raise HTTPException(
+            status_code=400,
+            detail="root must be 'datasets' or 'artifacts'",
+        )
+    if not base.exists():
+        return FileTreeResponse(entries=[])
+
+    entries: list[FileEntry] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        rel = os.path.relpath(dirpath, base)
+        rel = "" if rel == "." else rel
+        dirnames.sort()
+        filenames.sort()
+        for d in dirnames:
+            p = f"{rel}/{d}" if rel else d
+            entries.append(FileEntry(name=d, path=p, type="directory"))
+        for f in filenames:
+            p = f"{rel}/{f}" if rel else f
+            try:
+                sz = (Path(dirpath) / f).stat().st_size
+            except OSError:
+                sz = 0
+            entries.append(
+                FileEntry(name=f, path=p, type="file", size=sz),
+            )
+    return FileTreeResponse(entries=entries)
+
+
 # --- Repo Operations ---
 
 
@@ -380,6 +440,17 @@ async def install_repo_stream(
     csvc = _require_running_env(env_id)
     return StreamingResponse(
         csvc.install_repo_stream(env_id, repo_name),
+        media_type="text/plain",
+    )
+
+
+@app.get("/api/environments/{env_id}/repos/pull-stream")
+async def pull_repo_stream(
+    env_id: str, repo_name: str,
+) -> StreamingResponse:
+    csvc = _require_running_env(env_id)
+    return StreamingResponse(
+        csvc.pull_repo_stream(env_id, repo_name),
         media_type="text/plain",
     )
 

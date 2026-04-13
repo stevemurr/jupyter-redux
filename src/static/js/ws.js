@@ -142,6 +142,10 @@ class NotebookWebSocket {
         this.send({ type: 'interrupt', cell_id: cellId });
     }
 
+    forceStop(cellId) {
+        this.send({ type: 'force_stop', cell_id: cellId });
+    }
+
     disconnect() {
         this.intentionallyClosed = true;
         this._drainQueue();
