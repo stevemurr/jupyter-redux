@@ -18,8 +18,10 @@ class NotebookEditor {
         this.deleteBuffer = [];  // for undo delete (Z)
         this.lastDKey = 0;       // for DD shortcut
 
-        // Auto-save
-        this._saveTimer = null;
+        // Auto-save: per-cell debounce timers so edits to one cell
+        // don't clobber a pending save for another.
+        this._saveTimers = new Map();      // cellId -> timeout handle
+        this._lastSavedSource = new Map(); // cellId -> source last persisted
         this._saveDelay = 500;
 
         // DOM references
@@ -255,6 +257,7 @@ class NotebookEditor {
         }
 
         this.cells.set(cell.id, cell);
+        this._lastSavedSource.set(cell.id, cell.source);
         return cell;
     }
 
@@ -475,9 +478,14 @@ class NotebookEditor {
     // --- Auto-save ---
 
     onCellChanged(cellId, source) {
-        clearTimeout(this._saveTimer);
+        const existing = this._saveTimers.get(cellId);
+        if (existing) clearTimeout(existing);
         this._showSaveStatus('saving');
-        this._saveTimer = setTimeout(() => this._saveCell(cellId, source), this._saveDelay);
+        const handle = setTimeout(() => {
+            this._saveTimers.delete(cellId);
+            this._saveCell(cellId, source);
+        }, this._saveDelay);
+        this._saveTimers.set(cellId, handle);
     }
 
     async _saveCell(cellId, source) {
@@ -486,6 +494,7 @@ class NotebookEditor {
             { source }
         );
         if (result) {
+            this._lastSavedSource.set(cellId, source);
             this._showSaveStatus('saved');
         } else {
             this._showSaveStatus('error');
@@ -493,14 +502,21 @@ class NotebookEditor {
     }
 
     _saveAllCells() {
-        clearTimeout(this._saveTimer);
+        // Cancel any pending debounced saves — we're flushing now.
+        for (const handle of this._saveTimers.values()) clearTimeout(handle);
+        this._saveTimers.clear();
+
+        // `keepalive: true` lets the request outlive the unloading page,
+        // which a plain fetch does not.
         for (const [cellId, cell] of this.cells) {
             const source = cell.getSource();
-            if (source !== cell.source) {
-                // Fire-and-forget on unload
-                navigator.sendBeacon && false; // Beacon doesn't support JSON easily
-                api.put(`/api/notebooks/${this.notebookId}/cells/${cellId}`, { source });
-            }
+            if (source === this._lastSavedSource.get(cellId)) continue;
+            fetch(`/api/notebooks/${this.notebookId}/cells/${cellId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source }),
+                keepalive: true,
+            }).catch(() => {});
         }
     }
 
