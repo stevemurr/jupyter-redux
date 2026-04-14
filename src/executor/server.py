@@ -32,6 +32,11 @@ _send_lock = threading.Lock()
 # interrupt cascade to identify "child" threads spawned by user code so
 # we can post KeyboardInterrupt to them as well.
 _exec_baseline_thread_ids: set[int] = set()
+# Per-execution auto-detector that watches stdout for training metrics
+# and renders a live chart when it locks onto a pattern. Set by
+# handle_message at the start of each execute, cleared on completion.
+# See PatternLocker for the detection rules.
+_current_locker: "PatternLocker | None" = None
 
 # ---------------------------------------------------------------------------
 #  Directory creation tracking
@@ -106,6 +111,19 @@ def _get_namespace(notebook_id: str = "") -> dict:
 
 
 def send_message(conn: socket.socket, msg: dict) -> None:
+    # Feed stdout lines through the auto-monitor before they go out,
+    # so any synthesized chart messages are written just ahead of the
+    # text that triggered them. Wrapped in try/except so a detector
+    # bug can never break the stdout path.
+    if (
+        _current_locker is not None
+        and msg.get("type") == "output"
+        and msg.get("stream") == "stdout"
+    ):
+        try:
+            _current_locker.feed(msg.get("text", ""))
+        except Exception:
+            pass
     data = (json.dumps(msg) + "\n").encode("utf-8")
     with _send_lock:
         conn.sendall(data)
@@ -199,9 +217,79 @@ class StreamingWriter:
         raise OSError("StreamingWriter has no fileno")
 
 
+# Project-scoped install model. Cells like `pip install numpy` are
+# intercepted and rewritten to uv project commands (`uv add numpy`)
+# so everything ends up recorded in pyproject.toml and the lockfile.
+# Any `uv <anything>` cell passes through verbatim — this covers
+# `uv add`, `uv remove`, `uv sync`, `uv lock`, `uv run`, `uv tree`,
+# `uv pip install` (untracked escape hatch), and anything uv may add
+# in the future — without requiring a code update for each one.
+#
+# pyproject.toml lives at PROJECT_DIR. All uv commands run with
+# cwd=PROJECT_DIR so uv finds the project without upward-search
+# ambiguity.
+PROJECT_DIR = "/env/files"
+
+
+# Pip subcommands we remap to uv equivalents. `pip install` becomes
+# `uv add` (tracked), `pip uninstall` becomes `uv remove` (tracked),
+# `pip list`/`pip show` become `uv pip list`/`uv pip show` (untracked
+# reads). Anything else under `pip ...` isn't claimed by this detector.
+_PIP_SUBCOMMANDS = ("install", "uninstall", "list", "show")
+
+
 def is_pip_command(code: str) -> bool:
+    """Match any `uv ...` cell plus the specific `pip ...` subcommands
+    we remap. Permissive on uv so new uv subcommands (uv run, uv tree,
+    uv tool, etc.) work without touching this file."""
     stripped = code.strip()
-    return stripped.startswith(("pip install", "pip uninstall", "pip list", "pip show"))
+    if stripped == "uv" or stripped.startswith("uv "):
+        return True
+    for sub in _PIP_SUBCOMMANDS:
+        if stripped.startswith(f"pip {sub}"):
+            return True
+    return False
+
+
+def _tokenize_cell(code: str) -> list[str]:
+    return code.strip().split()
+
+
+_PIP_TO_UV = {
+    "install": ["uv", "add"],
+    "uninstall": ["uv", "remove"],
+    "list": ["uv", "pip", "list"],
+    "show": ["uv", "pip", "show"],
+}
+
+
+def _rewrite_pip(tokens: list[str]) -> list[str] | None:
+    if len(tokens) < 2:
+        return None
+    prefix = _PIP_TO_UV.get(tokens[1])
+    if prefix is None:
+        return None
+    return [*prefix, *tokens[2:]]
+
+
+def _build_uv_command(code: str) -> list[str] | None:
+    """Rewrite a pip/uv cell into the uv argv to actually execute.
+
+    `pip install/uninstall/list/show` are remapped to their uv
+    equivalents. `uv ...` cells pass through verbatim so any uv
+    subcommand — `run`, `tree`, `tool`, etc. — works without
+    per-subcommand handling.
+    """
+    tokens = _tokenize_cell(code)
+    if not tokens:
+        return None
+    if tokens[0] == "uv":
+        # Permissive passthrough — uv itself will surface a clear
+        # error if the subcommand is invalid.
+        return list(tokens)
+    if tokens[0] == "pip":
+        return _rewrite_pip(tokens)
+    return None
 
 
 _REQ_LINE_RE = re.compile(
@@ -228,20 +316,14 @@ def is_requirements_block(code: str) -> bool:
     return pkg_count >= 2
 
 
-PIP_TARGET_DIR = "/env/lib"
-
-
-def requirements_to_pip_args(code: str) -> list[str]:
-    """Convert requirements.txt content to pip install arg list."""
+def requirements_to_uv_add(code: str) -> list[str]:
+    """Convert a requirements.txt-style cell to a single `uv add` argv."""
     pkgs = []
     for line in code.strip().splitlines():
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
             pkgs.append(stripped)
-    return [
-        "python", "-m", "pip", "install",
-        "--target", PIP_TARGET_DIR, *pkgs,
-    ]
+    return ["uv", "add", *pkgs]
 
 
 def is_shell_command(code: str) -> bool:
@@ -354,8 +436,13 @@ def execute_apt(conn: socket.socket, code: str) -> bool:
         return True
 
 
-def execute_pip(conn: socket.socket, args: list[str]) -> None:
-    """Run pip as a list of args (no shell interpretation)."""
+def execute_uv(conn: socket.socket, args: list[str]) -> bool:
+    """Run a uv command streaming stdout/stderr back to the client.
+
+    cwd is PROJECT_DIR so uv finds pyproject.toml without any upward-
+    search ambiguity. Returns True on failure so the caller sets the
+    right terminal cell state.
+    """
     try:
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         process = subprocess.Popen(
@@ -365,14 +452,18 @@ def execute_pip(conn: socket.socket, args: list[str]) -> None:
             text=True,
             bufsize=1,
             env=env,
+            cwd=PROJECT_DIR,
         )
         for line in iter(process.stdout.readline, ""):
-            send_message(conn, {"type": "output", "stream": "stdout", "text": line})
+            send_message(conn, {
+                "type": "output", "stream": "stdout", "text": line,
+            })
         process.wait()
         send_message(conn, {
             "type": "result",
             "data": f"Exit code: {process.returncode}",
         })
+        return process.returncode != 0
     except Exception as e:
         send_message(conn, {
             "type": "error",
@@ -380,6 +471,7 @@ def execute_pip(conn: socket.socket, args: list[str]) -> None:
             "evalue": str(e),
             "traceback": traceback.format_exception(e),
         })
+        return True
 
 
 def execute_shell(conn: socket.socket, command: str) -> None:
@@ -600,6 +692,12 @@ _STEP_RE = re.compile(
     r"(?:epoch|step|iter(?:ation)?)\s*[:=]?\s*(\d+)(?:\s*/\s*\d+)?",
     re.IGNORECASE,
 )
+# Separate regex for the `N/M` denominator so PatternLocker can seed
+# a chart's total_steps from the first matched line.
+_STEP_TOTAL_RE = re.compile(
+    r"(?:epoch|step|iter(?:ation)?)\s*[:=]?\s*\d+\s*/\s*(\d+)",
+    re.IGNORECASE,
+)
 
 
 class _MonitorTeeWriter:
@@ -672,6 +770,149 @@ def _extract_metrics(line, custom_patterns):
         raise OSError("_MonitorTeeWriter has no fileno")
 
 
+class PatternLocker:
+    """Auto-detect training metrics in stdout and render a live chart.
+
+    Fed one stdout chunk at a time via feed(). Uses the same regex
+    parser as Monitor (_extract_metrics). Locks onto a pattern after
+    three consecutive matching lines with the same metric keyset,
+    strictly-increasing step, and at least one non-step value that
+    varies across the three. On lock, emits an init + three updates
+    carrying the buffered points so the chart starts with no gaps.
+
+    Scope: one run per execution. On cell end, finish() emits a done
+    message if the locker locked. Multi-stage runs, custom titles,
+    and custom regex patterns are covered by the explicit Monitor
+    class, which remains available as an escape hatch.
+    """
+
+    _counter = 0
+
+    def __init__(self, conn: socket.socket) -> None:
+        self._conn = conn
+        self._state = "scanning"  # "scanning" | "locked"
+        self._buffered: list[tuple[int, dict]] = []
+        self._line_buf = ""
+        self._committed_keys: frozenset | None = None
+        self._last_step: int | None = None
+        self._display_id: str | None = None
+        self._title = "Training"
+        self._total_steps: int | None = None
+
+    def feed(self, text: str) -> None:
+        self._line_buf += text
+        while "\n" in self._line_buf:
+            line, self._line_buf = self._line_buf.split("\n", 1)
+            line = line.rstrip("\r")
+            if line:
+                self._process_line(line)
+
+    def finish(self) -> None:
+        if self._state == "locked":
+            send_message(self._conn, {
+                "type": "display",
+                "display_type": "monitor",
+                "display_id": self._display_id,
+                "action": "done",
+            })
+
+    def _process_line(self, line: str) -> None:
+        step, metrics = _extract_metrics(line, [])
+        if step is None or not metrics:
+            return
+        keyset = frozenset(metrics.keys())
+        if self._state == "scanning":
+            self._handle_scanning(line, step, metrics, keyset)
+        else:
+            self._handle_locked(step, metrics, keyset)
+
+    def _handle_scanning(self, line, step, metrics, keyset) -> None:
+        if not self._buffered:
+            self._buffered.append((step, metrics))
+            self._title = self._derive_title(line)
+            self._total_steps = self._derive_total(line)
+            return
+
+        prev_step, prev_metrics = self._buffered[-1]
+        if keyset != frozenset(prev_metrics.keys()) or step <= prev_step:
+            # Continuity broken — restart scanning from this line.
+            self._buffered = [(step, metrics)]
+            self._title = self._derive_title(line)
+            self._total_steps = self._derive_total(line)
+            return
+
+        self._buffered.append((step, metrics))
+        if len(self._buffered) < 3:
+            return
+
+        # Require at least one metric to actually vary across the
+        # buffered points. Constant values are usually status/heartbeat
+        # output rather than training.
+        varies = any(
+            len({m[k] for _, m in self._buffered}) > 1
+            for k in keyset
+        )
+        if not varies:
+            self._buffered.pop(0)
+            return
+
+        self._lock(keyset)
+
+    def _handle_locked(self, step, metrics, keyset) -> None:
+        if keyset != self._committed_keys:
+            return
+        if self._last_step is not None and step <= self._last_step:
+            return
+        self._last_step = step
+        self._emit_update(step, metrics)
+
+    def _lock(self, keyset) -> None:
+        self._state = "locked"
+        self._committed_keys = keyset
+        PatternLocker._counter += 1
+        self._display_id = f"auto_{PatternLocker._counter}_{id(self):x}"
+
+        send_message(self._conn, {
+            "type": "display",
+            "display_type": "monitor",
+            "display_id": self._display_id,
+            "action": "init",
+            "config": {
+                "title": self._title,
+                "total_steps": self._total_steps,
+            },
+        })
+
+        for step, metrics in self._buffered:
+            self._last_step = step
+            self._emit_update(step, metrics)
+        self._buffered = []
+
+    def _emit_update(self, step, metrics) -> None:
+        send_message(self._conn, {
+            "type": "display",
+            "display_type": "monitor",
+            "display_id": self._display_id,
+            "action": "update",
+            "step": step,
+            "metrics": metrics,
+            "ts": time.time(),
+        })
+
+    @staticmethod
+    def _derive_title(line: str) -> str:
+        m = _STEP_RE.search(line)
+        if m is None:
+            return "Training"
+        prefix = line[:m.start()].strip().rstrip("|,:-").strip()
+        return prefix or "Training"
+
+    @staticmethod
+    def _derive_total(line: str) -> int | None:
+        m = _STEP_TOTAL_RE.search(line)
+        return int(m.group(1)) if m else None
+
+
 def execute_code(
     conn: socket.socket, code: str, notebook_id: str = "",
 ) -> bool:
@@ -731,39 +972,46 @@ def execute_code(
 
 
 def handle_message(conn: socket.socket, msg: dict) -> None:
+    global _current_locker
     msg_type = msg.get("type")
     if msg_type == "execute":
         code = msg.get("code", "")
         notebook_id = msg.get("notebook_id", "")
-        send_message(conn, {"type": "state", "execution_state": "running"})
+        _current_locker = PatternLocker(conn)
+        try:
+            send_message(conn, {"type": "state", "execution_state": "running"})
 
-        errored = False
-        if is_pip_command(code):
-            stripped = code.strip()
-            if stripped.startswith("pip install"):
-                pkgs = stripped[len("pip install"):].split()
-                execute_pip(conn, [
-                    "python", "-m", "pip", "install",
-                    "--target", PIP_TARGET_DIR, *pkgs,
-                ])
+            errored = False
+            if is_pip_command(code):
+                argv = _build_uv_command(code)
+                if argv is None:
+                    send_message(conn, {
+                        "type": "error",
+                        "ename": "ParseError",
+                        "evalue": f"Unrecognized install command: {code.strip()!r}",
+                        "traceback": [],
+                    })
+                    errored = True
+                else:
+                    errored = execute_uv(conn, argv)
+            elif is_requirements_block(code):
+                errored = execute_uv(conn, requirements_to_uv_add(code))
+            elif is_apt_command(code):
+                errored = execute_apt(conn, code)
+            elif is_shell_command(code):
+                execute_shell(conn, code[1:].strip())
             else:
-                # pip uninstall, pip list, pip show — no --target
-                execute_pip(conn, ["python", "-m", *stripped.split()])
-        elif is_requirements_block(code):
-            execute_pip(conn, requirements_to_pip_args(code))
-        elif is_apt_command(code):
-            errored = execute_apt(conn, code)
-        elif is_shell_command(code):
-            execute_shell(conn, code[1:].strip())
-        else:
-            errored = execute_code(conn, code, notebook_id)
+                errored = execute_code(conn, code, notebook_id)
 
-        created = _drain_created_dirs()
-        if created:
-            send_message(conn, {"type": "created_dirs", "dirs": created})
+            created = _drain_created_dirs()
+            if created:
+                send_message(conn, {"type": "created_dirs", "dirs": created})
 
-        final_state = "errored" if errored else "completed"
-        send_message(conn, {"type": "state", "execution_state": final_state})
+            _current_locker.finish()
+            final_state = "errored" if errored else "completed"
+            send_message(conn, {"type": "state", "execution_state": final_state})
+        finally:
+            _current_locker = None
 
     elif msg_type == "ping":
         send_message(conn, {"type": "pong"})
