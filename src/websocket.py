@@ -560,6 +560,27 @@ async def _message_loop(
             print(f"[WS] execute received: {cell_id[:8]}", flush=True)
             container_service.record_activity(environment_id)
 
+            # Re-fetch the executor from the shared dict instead of
+            # trusting the one captured at WS setup. If a force_stop
+            # in *another* notebook tore the client down, the one we
+            # captured is stale and would raise "Not connected to
+            # executor" on send. Using the current dict entry (or
+            # recycling the WS when it's missing) keeps multiple
+            # notebooks in the same env in sync.
+            current = active_executors.get(environment_id)
+            if current is None or not current.is_connected:
+                print(
+                    f"[WS] stale executor for env {environment_id[:8]}; "
+                    "closing WS so the client reconnects",
+                    flush=True,
+                )
+                try:
+                    await ws.close(code=1012, reason="executor restarted")
+                except Exception:
+                    pass
+                return
+            executor = current
+
             # Acquire the executor ref SYNCHRONOUSLY before scheduling the
             # task. Otherwise the WS could disconnect and tear down the
             # executor before the task gets a chance to run, leaving the
@@ -597,13 +618,18 @@ async def _message_loop(
                     "execution_state": "stopping",
                     "execution_count": rec.execution_count,
                 })
-            try:
-                await executor.interrupt()
-            except Exception:
-                logger.warning(
-                    "Failed to send interrupt for %s",
-                    msg.get("cell_id", ""),
-                )
+            # Use the current executor from active_executors rather
+            # than the one captured at WS setup, so interrupts work
+            # even after a force_stop in another notebook.
+            current = active_executors.get(environment_id)
+            if current is not None and current.is_connected:
+                try:
+                    await current.interrupt()
+                except Exception:
+                    logger.warning(
+                        "Failed to send interrupt for %s",
+                        msg.get("cell_id", ""),
+                    )
 
         elif msg_type == "force_stop":
             await _handle_force_stop(
@@ -665,9 +691,6 @@ async def _execute_under_lock(
             "execution_count": exec_count,
         })
 
-        notebook = env_service.get_notebook(notebook_id)
-        _set_cell_running(notebook, cell_id, exec_count)
-
         final_state = "completed"
         try:
             async for msg in executor.execute(code, notebook_id):
@@ -689,13 +712,12 @@ async def _execute_under_lock(
             })
         finally:
             _finalize_execution(
-                rec, notebook, notebook_id, cell_id, exec_count, final_state,
+                rec, notebook_id, cell_id, exec_count, final_state,
             )
 
 
 def _finalize_execution(
     rec: RunningExecution,
-    notebook,
     notebook_id: str,
     cell_id: str,
     exec_count: int,
@@ -712,7 +734,7 @@ def _finalize_execution(
     })
 
     _persist_cell_outputs(
-        notebook, notebook_id, cell_id,
+        notebook_id, cell_id,
         final_state, exec_count, rec.persisted_outputs,
     )
 
@@ -887,21 +909,16 @@ async def _subscribe_and_forward(
 # ---------------------------------------------------------------------------
 
 
-def _set_cell_running(notebook, cell_id: str, exec_count: int) -> None:
-    if not notebook:
-        return
-    for cell in notebook.cells:
-        if cell.id == cell_id:
-            cell.execution_state = ExecutionState.RUNNING
-            cell.execution_count = exec_count
-            cell.outputs = []
-            break
-
-
 def _persist_cell_outputs(
-    notebook, notebook_id: str, cell_id: str,
+    notebook_id: str, cell_id: str,
     final_state: str, exec_count: int, outputs: list[Output],
 ) -> None:
+    # Re-read from disk so we pick up any cells added or edited
+    # concurrently during this execution. The notebook captured at
+    # execution start is stale by the time we reach finalization —
+    # writing it back would silently wipe any cells added in the
+    # meantime.
+    notebook = env_service.get_notebook(notebook_id)
     if not notebook:
         return
     for cell in notebook.cells:
