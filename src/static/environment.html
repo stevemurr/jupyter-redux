@@ -51,11 +51,15 @@
                 <!-- Environment -->
                 <div class="sidebar-header">
                     <h3>Environment</h3>
+                    <div class="sidebar-actions">
+                        <button id="btn-sync-env" title="Run uv sync to reconcile .venv with pyproject.toml">Sync</button>
+                    </div>
                 </div>
                 <div class="sidebar-env-meta">
                     <input type="text" class="env-title-input" id="env-title"
                            aria-label="Environment name" placeholder="Untitled Environment">
                     <div class="notebook-card-badges" id="env-badges"></div>
+                    <div id="sync-status" class="sync-status" style="display:none;"></div>
                 </div>
 
                 <!-- Notebooks -->
@@ -66,30 +70,6 @@
                     </div>
                 </div>
                 <div id="notebook-list" style="padding:4px 0;"></div>
-
-                <!-- Datasets (read-only browse of /shared/datasets) -->
-                <div class="sidebar-header shared-header collapsed" data-target="datasets-tree">
-                    <span class="section-chevron">&#9654;</span>
-                    <h3>Datasets</h3>
-                    <div class="sidebar-actions">
-                        <button class="btn-refresh-shared" data-root="datasets" title="Refresh">&#8635;</button>
-                    </div>
-                </div>
-                <div class="file-tree shared-tree" id="datasets-tree" style="display:none;">
-                    <div class="file-tree-empty">No datasets yet.</div>
-                </div>
-
-                <!-- Artifacts (read-only browse of /shared/artifacts) -->
-                <div class="sidebar-header shared-header collapsed" data-target="artifacts-tree">
-                    <span class="section-chevron">&#9654;</span>
-                    <h3>Artifacts</h3>
-                    <div class="sidebar-actions">
-                        <button class="btn-refresh-shared" data-root="artifacts" title="Refresh">&#8635;</button>
-                    </div>
-                </div>
-                <div class="file-tree shared-tree" id="artifacts-tree" style="display:none;">
-                    <div class="file-tree-empty">No artifacts yet.</div>
-                </div>
 
                 <!-- Repos -->
                 <div class="sidebar-header">
@@ -140,6 +120,40 @@
             <div class="file-editor-status" id="editor-status">
                 <span id="status-path"></span>
                 <span id="status-save"></span>
+            </div>
+        </div>
+
+        <!-- Right sidebar: shared datasets + artifacts -->
+        <div class="env-sidebar env-sidebar-right collapsed" id="env-sidebar-right">
+            <div class="sidebar-topbar">
+                <button class="sidebar-toggle" id="sidebar-right-toggle" title="Toggle sidebar">
+                    <span id="toggle-right-icon">&#9664;</span>
+                </button>
+            </div>
+            <div class="sidebar-middle">
+                <!-- Datasets (read-only browse of /shared/datasets) -->
+                <div class="sidebar-header shared-header collapsed" data-target="datasets-tree">
+                    <span class="section-chevron">&#9654;</span>
+                    <h3>Datasets</h3>
+                    <div class="sidebar-actions">
+                        <button class="btn-refresh-shared" data-root="datasets" title="Refresh">&#8635;</button>
+                    </div>
+                </div>
+                <div class="file-tree shared-tree" id="datasets-tree" style="display:none;">
+                    <div class="file-tree-empty">No datasets yet.</div>
+                </div>
+
+                <!-- Artifacts (read-only browse of /shared/artifacts) -->
+                <div class="sidebar-header shared-header collapsed" data-target="artifacts-tree">
+                    <span class="section-chevron">&#9654;</span>
+                    <h3>Artifacts</h3>
+                    <div class="sidebar-actions">
+                        <button class="btn-refresh-shared" data-root="artifacts" title="Refresh">&#8635;</button>
+                    </div>
+                </div>
+                <div class="file-tree shared-tree" id="artifacts-tree" style="display:none;">
+                    <div class="file-tree-empty">No artifacts yet.</div>
+                </div>
             </div>
         </div>
     </div>
@@ -232,6 +246,9 @@
         const sidebar = document.getElementById('env-sidebar');
         const toggleBtn = document.getElementById('sidebar-toggle');
         const toggleIcon = document.getElementById('toggle-icon');
+        const sidebarRight = document.getElementById('env-sidebar-right');
+        const toggleRightBtn = document.getElementById('sidebar-right-toggle');
+        const toggleRightIcon = document.getElementById('toggle-right-icon');
         const _installingRepos = new Set();
 
         // --- Sidebar collapse ---
@@ -246,6 +263,20 @@
         });
         if (localStorage.getItem('jredux-sidebar-collapsed') === '1') {
             setSidebarCollapsed(true);
+        }
+
+        // --- Right sidebar collapse (defaults to collapsed) ---
+        function setRightSidebarCollapsed(collapsed) {
+            sidebarRight.classList.toggle('collapsed', collapsed);
+            toggleRightIcon.innerHTML = collapsed ? '&#9664;' : '&#9654;';
+            toggleRightBtn.title = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+            localStorage.setItem('jredux-right-sidebar-collapsed', collapsed ? '1' : '0');
+        }
+        toggleRightBtn.addEventListener('click', () => {
+            setRightSidebarCollapsed(!sidebarRight.classList.contains('collapsed'));
+        });
+        if (localStorage.getItem('jredux-right-sidebar-collapsed') === '0') {
+            setRightSidebarCollapsed(false);
         }
 
         // =====================================================================
@@ -331,9 +362,14 @@
         // =====================================================================
         // Read-only browsers rooted at /shared/datasets and /shared/artifacts.
         // Users don't edit files through these — they're for awareness of
-        // what's available. Directory-level collapse state is per-tree so
-        // Datasets and Artifacts don't clobber each other.
-        const _sharedCollapsedDirs = {
+        // what's available. Directories default to collapsed so opening the
+        // section doesn't flood the sidebar with contents; the user clicks
+        // a directory to reveal its children. State is per-tree so Datasets
+        // and Artifacts don't clobber each other.
+        //
+        // Semantics: presence in the set means EXPANDED. Default (not in
+        // set) is collapsed. Click a directory to toggle.
+        const _sharedExpandedDirs = {
             datasets: new Set(),
             artifacts: new Set(),
         };
@@ -385,15 +421,17 @@
             }
             walkTree('');
 
-            const collapsedSet = _sharedCollapsedDirs[root];
+            const expandedSet = _sharedExpandedDirs[root];
             const allEntries = ordered;
             for (const entry of allEntries) {
+                // Hide this entry if ANY of its ancestor directories
+                // is not in the expanded set (i.e. still collapsed).
                 let hidden = false;
                 if (entry.path.includes('/')) {
                     const parts = entry.path.split('/');
                     for (let i = 1; i < parts.length; i++) {
                         const ancestor = parts.slice(0, i).join('/');
-                        if (collapsedSet.has(ancestor)) { hidden = true; break; }
+                        if (!expandedSet.has(ancestor)) { hidden = true; break; }
                     }
                 }
 
@@ -403,8 +441,8 @@
 
                 const depth = entry.path.split('/').length - 1;
                 const isDir = entry.type === 'directory';
-                const collapsed = collapsedSet.has(entry.path);
-                const chevron = isDir ? (collapsed ? '&#9654;' : '&#9660;') : '';
+                const expanded = expandedSet.has(entry.path);
+                const chevron = isDir ? (expanded ? '&#9660;' : '&#9654;') : '';
                 const icon = isDir ? '&#128193;' : '&#128196;';
                 const sizeStr = entry.size != null ? formatSize(entry.size) : '';
                 el.innerHTML = `
@@ -415,8 +453,8 @@
                 `;
                 if (isDir) {
                     el.addEventListener('click', () => {
-                        if (collapsedSet.has(entry.path)) collapsedSet.delete(entry.path);
-                        else collapsedSet.add(entry.path);
+                        if (expandedSet.has(entry.path)) expandedSet.delete(entry.path);
+                        else expandedSet.add(entry.path);
                         renderSharedTree(container, root, entries);
                     });
                 }
@@ -427,6 +465,138 @@
         function refreshSharedTrees() {
             loadSharedTree('datasets');
             loadSharedTree('artifacts');
+        }
+
+        // =====================================================================
+        //  PASTE NORMALIZATION
+        // =====================================================================
+        // Cheap whitespace cleanup on every cell paste. Handles the common
+        // "pasted code looks broken" cases without requiring a round trip
+        // to the backend formatter:
+        //   - CRLF → LF so line endings match everything else in the doc
+        //   - Tabs → 4 spaces (our chosen indent style)
+        //   - Non-breaking space → regular space (web copies often have these)
+        //   - Smart/curly quotes → straight quotes (Python can't parse curly)
+        //   - Trailing whitespace per line stripped
+        //   - Context-aware dedent: if pasting at col 0 of a line with no
+        //     prior content, strip the minimum common leading whitespace
+        //     from the block so "I copied a nested function body" still
+        //     lands at module indent. Don't dedent when pasting inside an
+        //     already-indented region — the user is pasting into context
+        //     and probably wants the indentation preserved as-is.
+        function normalizePastedText(raw, atColZero) {
+            let text = raw.replace(/\r\n?/g, '\n');
+            text = text.replace(/\t/g, '    ');
+            text = text.replace(/\u00a0/g, ' ');
+            text = text.replace(/[\u2018\u2019\u201A\u201B]/g, "'");
+            text = text.replace(/[\u201C\u201D\u201E\u201F]/g, '"');
+            text = text.split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n');
+            if (atColZero) {
+                text = dedentBlock(text);
+            }
+            return text;
+        }
+
+        function dedentBlock(text) {
+            const lines = text.split('\n');
+            let minIndent = Infinity;
+            for (const line of lines) {
+                if (line.trim() === '') continue;
+                const m = line.match(/^( *)/);
+                if (m) minIndent = Math.min(minIndent, m[1].length);
+            }
+            if (!Number.isFinite(minIndent) || minIndent === 0) return text;
+            return lines.map(l => l.slice(minIndent)).join('\n');
+        }
+
+        // CodeMirror paste handler extension. Returning true from the
+        // domEventHandlers callback suppresses the default paste so we
+        // can dispatch the cleaned version ourselves.
+        //
+        // Wrapped in a factory because EditorView.domEventHandlers is
+        // only reachable once the CodeMirror bundle module script has
+        // loaded. The inline IIFE runs BEFORE that load completes, so
+        // any top-level reference to `EditorView` throws a
+        // ReferenceError and crashes the whole page init. Called from
+        // addCellToTab which is already gated on the codemirror-ready
+        // event.
+        function makeCellPasteFilter() {
+            return window.EditorView.domEventHandlers({
+                paste(event, view) {
+                    const clipboard = event.clipboardData;
+                    if (!clipboard) return false;
+                    const raw = clipboard.getData('text/plain');
+                    if (!raw) return false;
+                    const sel = view.state.selection.main;
+                    const line = view.state.doc.lineAt(sel.from);
+                    // "At col 0" = cursor is at line start OR the text
+                    // before it is all whitespace. Pasting into the
+                    // middle of an indented block should preserve
+                    // indentation; pasting at the start of an empty-ish
+                    // line is where dedent helps.
+                    const atColZero = (
+                        sel.from === line.from
+                        || line.text.slice(0, sel.from - line.from).trim() === ''
+                    );
+                    const cleaned = normalizePastedText(raw, atColZero);
+                    if (cleaned === raw) return false;
+                    event.preventDefault();
+                    view.dispatch({
+                        changes: { from: sel.from, to: sel.to, insert: cleaned },
+                        selection: { anchor: sel.from + cleaned.length },
+                    });
+                    return true;
+                },
+            });
+        }
+
+        // Shift-Alt-F: POST the current cell's source to the /format
+        // endpoint and replace it with the result. On failure, flash a
+        // toast on the cell header for ~3s. Returning true from the
+        // keybinding handler prevents CodeMirror's default behavior.
+        async function formatCellWithRuff(view, cellInfo) {
+            const source = view.state.doc.toString();
+            try {
+                const res = await api.post(
+                    `/api/environments/${envId}/format`,
+                    { code: source },
+                );
+                if (!res) {
+                    flashCellToast(cellInfo, 'Format failed: request error', 'error');
+                    return;
+                }
+                if (res.error) {
+                    flashCellToast(cellInfo, 'Format failed', 'error');
+                    return;
+                }
+                if (res.formatted === source) {
+                    flashCellToast(cellInfo, 'Already formatted', 'info');
+                    return;
+                }
+                view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: res.formatted },
+                });
+                flashCellToast(cellInfo, 'Formatted', 'success');
+            } catch (e) {
+                flashCellToast(cellInfo, 'Format failed', 'error');
+            }
+        }
+
+        function flashCellToast(cellInfo, message, kind) {
+            if (!cellInfo || !cellInfo.el) return;
+            let toast = cellInfo.el.querySelector('.cell-toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.className = 'cell-toast';
+                cellInfo.el.appendChild(toast);
+            }
+            toast.textContent = message;
+            toast.dataset.kind = kind || 'info';
+            toast.style.display = 'block';
+            clearTimeout(cellInfo._toastTimer);
+            cellInfo._toastTimer = setTimeout(() => {
+                toast.style.display = 'none';
+            }, 2500);
         }
 
         // =====================================================================
@@ -893,6 +1063,11 @@
                 keymap.of([
                     { key:'Shift-Enter', run:() => { executeCell(tab, cellId); return true; } },
                     { key:'Ctrl-Enter', run:() => { executeCell(tab, cellId); return true; } },
+                    { key:'Shift-Alt-f', run: (view) => {
+                        const info = tab.cells.get(cellId);
+                        formatCellWithRuff(view, info);
+                        return true;
+                    }},
                     { key:'Tab', run: acceptCompletion },
                     ...completionKeymap,
                     ...defaultKeymap,
@@ -903,6 +1078,8 @@
                 // it composes with the default completion sources.
                 window.pythonLanguage.data.of({ autocomplete: sharedPathCompletion }),
                 autocompletion(),
+                // Whitespace / smart-quote / dedent normalization on paste.
+                makeCellPasteFilter(),
                 EditorView.updateListener.of((update) => {
                     if (update.docChanged) scheduleCellSave(tab, cellId, update.state.doc.toString());
                 }),
@@ -1795,12 +1972,24 @@
                 }
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
+                let collected = '';
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    // Stream chunks already contain newlines, append directly
-                    buildLogContent.textContent += decoder.decode(value, { stream: true });
+                    const chunk = decoder.decode(value, { stream: true });
+                    collected += chunk;
+                    buildLogContent.textContent += chunk;
                     buildLogContent.scrollTop = buildLogContent.scrollHeight;
+                }
+                // Heuristic: uv prints a "Failed to build" / "error:"
+                // section on failure. Scan the collected output for
+                // those markers rather than blindly claiming success.
+                const failed = /^(?:\s*error:|\s*×\s|\s*help:)/m.test(collected) ||
+                               /Failed to build/i.test(collected);
+                if (failed) {
+                    appendBuildLog('Installation failed — see output above.');
+                    setRepoInstalling(name, false);
+                    return false;
                 }
                 appendBuildLog('Installed successfully. Package is now importable.');
                 setRepoInstalling(name, false);
@@ -1898,6 +2087,47 @@
         // =====================================================================
         //  TOOLBAR: ENV / NOTEBOOK DIALOG
         // =====================================================================
+
+        // Sync button: runs `uv sync` against the env's pyproject.toml.
+        // Useful when the user edits pyproject.toml manually and wants
+        // the venv reconciled without opening a cell.
+        const syncStatus = document.getElementById('sync-status');
+        const syncBtn = document.getElementById('btn-sync-env');
+        syncBtn.addEventListener('click', async () => {
+            if (syncBtn.disabled) return;
+            syncBtn.disabled = true;
+            syncBtn.textContent = 'Syncing...';
+            syncStatus.style.display = 'block';
+            syncStatus.className = 'sync-status running';
+            syncStatus.textContent = 'Running uv sync...';
+            try {
+                const res = await api.post(`/api/environments/${envId}/sync`, {});
+                if (res && typeof res.output === 'string') {
+                    const out = res.output.trim();
+                    syncStatus.className = 'sync-status success';
+                    syncStatus.textContent = out || 'Sync complete.';
+                    // Invalidate path-completion cache since new packages
+                    // may have landed in /env/.venv and could be imported
+                    // — though the cache tracks /shared paths, not venv
+                    // imports. Refresh sidebar trees for good measure.
+                    invalidateSharedPathCache();
+                } else {
+                    syncStatus.className = 'sync-status error';
+                    syncStatus.textContent = 'Sync returned no output.';
+                }
+            } catch (e) {
+                syncStatus.className = 'sync-status error';
+                syncStatus.textContent = 'Sync failed: ' + (e && e.message ? e.message : e);
+            } finally {
+                syncBtn.disabled = false;
+                syncBtn.textContent = 'Sync';
+                setTimeout(() => {
+                    if (syncStatus.className.includes('success')) {
+                        syncStatus.style.display = 'none';
+                    }
+                }, 4000);
+            }
+        });
 
         titleInput.addEventListener('change', async () => {
             const n = titleInput.value.trim();

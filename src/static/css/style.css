@@ -567,6 +567,41 @@ html, body {
     border-left: 3px solid var(--accent-yellow);
 }
 
+/* Brief transient status message inside a cell (used for format
+   success/failure feedback). Anchored to the cell's top-right so
+   it doesn't jostle existing content. */
+.cell-toast {
+    position: absolute;
+    top: 6px;
+    right: 12px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+}
+
+.cell-toast[data-kind="success"] {
+    background: rgba(158, 206, 106, 0.15);
+    color: var(--accent-green);
+}
+
+.cell-toast[data-kind="error"] {
+    background: rgba(247, 118, 142, 0.15);
+    color: var(--accent-red);
+}
+
+.cell-toast[data-kind="info"] {
+    background: rgba(122, 162, 247, 0.15);
+    color: var(--accent-blue);
+}
+
+.cell {
+    position: relative;
+}
+
 .cell.running.stopping {
     border-left: 3px solid var(--accent-red);
     animation: cell-stopping-pulse 1.4s ease-in-out infinite;
@@ -1252,6 +1287,24 @@ input:focus-visible {
     min-width: 68px;
 }
 
+/* Right sidebar mirrors the left: border on the opposite edge. */
+.env-sidebar.env-sidebar-right {
+    border-right: none;
+    border-left: 1px solid var(--border-default);
+}
+
+/* The right sidebar has no back button, so push the toggle to the left
+   edge in expanded mode (matching the left sidebar's visual balance:
+   back-arrow-at-outer-edge, toggle-at-inner-edge). */
+.env-sidebar.env-sidebar-right .sidebar-toggle {
+    margin-left: 0;
+    margin-right: auto;
+}
+
+.env-sidebar.env-sidebar-right.collapsed .sidebar-toggle {
+    margin-right: 0;
+}
+
 /* --- Topbar: back + toggle, always visible --- */
 .sidebar-topbar {
     display: flex;
@@ -1371,6 +1424,32 @@ input:focus-visible {
     align-items: center;
     flex-wrap: wrap;
     gap: 6px;
+}
+
+.sync-status {
+    margin-top: 4px;
+    padding: 6px 8px;
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow-y: auto;
+}
+
+.sync-status.running {
+    background: rgba(224, 175, 104, 0.12);
+    color: var(--accent-yellow);
+}
+
+.sync-status.success {
+    background: rgba(158, 206, 106, 0.12);
+    color: var(--accent-green);
+}
+
+.sync-status.error {
+    background: rgba(247, 118, 142, 0.12);
+    color: var(--accent-red);
 }
 
 /* --- Bottom: resources + container status, always visible --- */

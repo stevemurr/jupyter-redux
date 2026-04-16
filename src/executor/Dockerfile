@@ -4,7 +4,7 @@ ARG PYTHON_VERSION=3.11
 FROM python:${PYTHON_VERSION}-slim AS cpu
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git gosu sudo && \
+    apt-get install -y --no-install-recommends git gosu sudo build-essential && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Let the jredux user run apt-get (and nothing else) as root without
@@ -14,6 +14,15 @@ RUN apt-get update && \
 # referencing it here is fine.
 RUN echo 'jredux ALL=(root) NOPASSWD: /usr/bin/apt-get' > /etc/sudoers.d/jredux-apt && \
     chmod 440 /etc/sudoers.d/jredux-apt
+
+# uv: fast pip replacement. `pip install` cells route through
+# `uv pip install` when uv is present (with a binary-level fallback
+# to plain pip if it ever isn't).
+RUN pip install --no-cache-dir uv
+
+# ruff: fast Python formatter/linter. Backed by the /format endpoint
+# so cells can be reformatted via Shift-Alt-F.
+RUN pip install --no-cache-dir ruff
 
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1
@@ -37,11 +46,11 @@ ARG PYTHON_VERSION=3.11
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        software-properties-common gpg-agent git gosu sudo && \
+        software-properties-common gpg-agent git gosu sudo build-essential && \
     add-apt-repository -y ppa:deadsnakes/ppa && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv && \
+        python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
     python -m ensurepip --upgrade && \
@@ -50,6 +59,12 @@ RUN apt-get update && \
 # Same sudoers grant as the cpu target — see the note there.
 RUN echo 'jredux ALL=(root) NOPASSWD: /usr/bin/apt-get' > /etc/sudoers.d/jredux-apt && \
     chmod 440 /etc/sudoers.d/jredux-apt
+
+# uv: fast pip replacement. See the note on the cpu target.
+RUN pip install --no-cache-dir uv
+
+# ruff: same note as cpu.
+RUN pip install --no-cache-dir ruff
 
 ENV PYTHONPATH=/env/lib:/env/files
 ENV PIP_NO_CACHE_DIR=1

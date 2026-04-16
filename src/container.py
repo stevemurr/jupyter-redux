@@ -25,11 +25,12 @@ CONTAINER_PREFIX = "jredux-env"
 VOLUME_PREFIX = "jredux-env"
 
 # Named docker volumes for tool caches shared across all env containers.
-# Mounted at the target user's ~/.cache path so HuggingFace, pip, and
-# torch find their cache without extra env vars.
+# Mounted at the target user's ~/.cache path so HuggingFace, pip, torch,
+# and uv find their cache without extra env vars.
 CACHE_HF_VOLUME = "jredux-cache-hf"
 CACHE_PIP_VOLUME = "jredux-cache-pip"
 CACHE_TORCH_VOLUME = "jredux-cache-torch"
+CACHE_UV_VOLUME = "jredux-cache-uv"
 
 
 def _parse_nvidia_smi_csv(text: str) -> tuple[int, int, int, bool, bool]:
@@ -168,7 +169,10 @@ class ContainerService:
         shared host bind mounts for datasets (read-only) and artifacts
         (read-write). Missing host paths are skipped silently.
         """
-        for vol in (CACHE_HF_VOLUME, CACHE_PIP_VOLUME, CACHE_TORCH_VOLUME):
+        for vol in (
+            CACHE_HF_VOLUME, CACHE_PIP_VOLUME,
+            CACHE_TORCH_VOLUME, CACHE_UV_VOLUME,
+        ):
             self._ensure_volume(vol)
 
         volumes: dict = {
@@ -181,6 +185,9 @@ class ContainerService:
             },
             CACHE_TORCH_VOLUME: {
                 "bind": "/home/jredux/.cache/torch", "mode": "rw",
+            },
+            CACHE_UV_VOLUME: {
+                "bind": "/home/jredux/.cache/uv", "mode": "rw",
             },
         }
 
@@ -543,13 +550,21 @@ class ContainerService:
                 f"Repo '{name}' already exists at {dest}"
             )
 
-        # Run git clone
+        # Run git clone as jredux so every file lands owned by the
+        # host user. Cloning as root (the exec_run default) would
+        # leave a root-owned source tree, which then breaks `uv add
+        # --editable` because setuptools can't write the package's
+        # egg-info back into the source dir.
         cmd = ["git", "clone", "--depth", "1"]
         if branch:
             cmd.extend(["--branch", branch])
         cmd.extend([url, dest])
 
-        exit_code, output = container.exec_run(cmd)
+        exit_code, output = container.exec_run(
+            cmd,
+            user="jredux",
+            environment={"HOME": "/home/jredux"},
+        )
         if exit_code != 0:
             raise RuntimeError(
                 f"git clone failed: {output.decode(errors='replace')}"
@@ -598,7 +613,11 @@ class ContainerService:
     def install_repo(
         self, environment_id: str, repo_name: str,
     ) -> str:
-        """Run pip install -e on a cloned repo."""
+        """Install a cloned repo as an editable package via uv add.
+
+        Runs with cwd=/env/files so uv modifies the env's pyproject.toml
+        (not the repo's own pyproject.toml, if it has one).
+        """
         container = self._get_running_container(environment_id)
         dest = f"{self.REPOS_ROOT}/{repo_name}"
 
@@ -607,14 +626,21 @@ class ContainerService:
             raise FileNotFoundError(f"Repo '{repo_name}' not found")
 
         exit_code, output = container.exec_run(
-            ["pip", "install", "-e", dest],
+            ["uv", "add", "--editable", dest],
+            workdir="/env/files",
+            user="jredux",
+            environment={
+                "HOME": "/home/jredux",
+                "UV_PROJECT_ENVIRONMENT": "/env/.venv",
+                "UV_LINK_MODE": "copy",
+            },
         )
         return output.decode(errors="replace")
 
     def install_repo_stream(
         self, environment_id: str, repo_name: str,
     ):
-        """Run pip install -e, yielding output chunks as they arrive."""
+        """Stream `uv add --editable <repo>` output as it arrives."""
         container = self._get_running_container(environment_id)
         dest = f"{self.REPOS_ROOT}/{repo_name}"
 
@@ -623,11 +649,110 @@ class ContainerService:
             raise FileNotFoundError(f"Repo '{repo_name}' not found")
 
         _, stream = container.exec_run(
-            ["pip", "install", "-e", dest],
+            ["uv", "add", "--editable", dest],
+            workdir="/env/files",
+            user="jredux",
+            environment={
+                "HOME": "/home/jredux",
+                "UV_PROJECT_ENVIRONMENT": "/env/.venv",
+                "UV_LINK_MODE": "copy",
+            },
             stream=True,
         )
         for chunk in stream:
             yield chunk.decode(errors="replace")
+
+    def format_code(
+        self, environment_id: str, code: str,
+    ) -> tuple[str, str | None]:
+        """Run `ruff format` on a code snippet inside the env container.
+
+        Writes the code to /tmp/jredux-format.py via put_archive, runs
+        `ruff format <file>` as jredux, reads the result back, and
+        cleans up. Returns ``(formatted_code, None)`` on success or
+        ``(original_code, error_message)`` on failure (syntax error,
+        ruff not installed, etc.) so the caller can leave the cell
+        content untouched and surface the error to the user.
+        """
+        container = self._get_running_container(environment_id)
+
+        tmp_name = "jredux-format.py"
+        tmp_path = f"/tmp/{tmp_name}"
+
+        # --- 1. Put the code into /tmp in the container. ---
+        # Set uid/gid in the tar entry so the file lands owned by
+        # jredux (not root, which is what put_archive defaults to
+        # because TarInfo.uid/gid are 0 out of the box). Without
+        # this, ruff can read the file but can't overwrite it with
+        # the formatted result, and the whole format call errors.
+        data = code.encode("utf-8")
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=tmp_name)
+            info.size = len(data)
+            info.mode = 0o644
+            info.uid = settings.host_uid
+            info.gid = settings.host_gid
+            tar.addfile(info, io.BytesIO(data))
+        buf.seek(0)
+        container.put_archive("/tmp", buf)
+
+        # --- 2. Run ruff format as jredux (so file ownership stays
+        #        consistent with the rest of the env).               ---
+        # `--no-cache` sidesteps ruff's default of placing the cache
+        # directory at <project root>/.ruff_cache. docker exec runs
+        # with cwd=/ by default, so ruff walks up to the filesystem
+        # root and tries to create /.ruff_cache — which jredux can't
+        # write. Single-file formatting doesn't benefit from caching
+        # anyway, so turning it off is free.
+        exit_code, output = container.exec_run(
+            ["ruff", "format", "--no-cache", tmp_path],
+            user="jredux",
+            environment={"HOME": "/home/jredux"},
+        )
+        if exit_code != 0:
+            container.exec_run(["rm", "-f", tmp_path])
+            err = output.decode("utf-8", errors="replace").strip()
+            return code, err or f"ruff format exited {exit_code}"
+
+        # --- 3. Read the reformatted file back out. ---
+        try:
+            bits, _ = container.get_archive(tmp_path)
+            tar_bytes = b"".join(bits)
+            tar_buf = io.BytesIO(tar_bytes)
+            with tarfile.open(fileobj=tar_buf, mode="r") as tar:
+                members = tar.getmembers()
+                if not members:
+                    return code, "ruff format produced no output"
+                f = tar.extractfile(members[0])
+                formatted = f.read().decode("utf-8") if f else code
+        except Exception as exc:
+            container.exec_run(["rm", "-f", tmp_path])
+            return code, f"failed to read formatted result: {exc}"
+        finally:
+            container.exec_run(["rm", "-f", tmp_path])
+
+        return formatted, None
+
+    def sync_env(self, environment_id: str) -> str:
+        """Run `uv sync` for the env's project.
+
+        Called from the Sync button. Uses plain sync (not --frozen) so
+        if the user edited pyproject.toml manually it gets reconciled.
+        Returns the combined stdout/stderr.
+        """
+        container = self._get_running_container(environment_id)
+        exit_code, output = container.exec_run(
+            ["uv", "sync"],
+            workdir="/env/files",
+            user="jredux",
+            environment={
+                "HOME": "/home/jredux",
+                "UV_PROJECT_ENVIRONMENT": "/env/.venv",
+                "UV_LINK_MODE": "copy",
+            },
+        )
+        return output.decode(errors="replace")
 
     def pull_repo_stream(
         self, environment_id: str, repo_name: str,
@@ -640,9 +765,15 @@ class ContainerService:
         if exit_code != 0:
             raise FileNotFoundError(f"Repo '{repo_name}' not found")
 
+        # All git operations run as jredux so file ownership stays
+        # consistent with the original clone.
+        git_env = {"HOME": "/home/jredux"}
+
         # Unshallow if needed (clones use --depth 1)
         exit_code, _ = container.exec_run(
             ["git", "-C", dest, "rev-parse", "--is-shallow-repository"],
+            user="jredux",
+            environment=git_env,
         )
         is_shallow = (
             exit_code == 0
@@ -652,6 +783,8 @@ class ContainerService:
         if is_shallow:
             _, stream = container.exec_run(
                 ["git", "-C", dest, "fetch", "--unshallow", "origin"],
+                user="jredux",
+                environment=git_env,
                 stream=True,
             )
             for chunk in stream:
@@ -659,6 +792,8 @@ class ContainerService:
 
         _, stream = container.exec_run(
             ["git", "-C", dest, "pull", "--ff-only"],
+            user="jredux",
+            environment=git_env,
             stream=True,
         )
         for chunk in stream:

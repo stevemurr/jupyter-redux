@@ -433,6 +433,32 @@ async def install_repo(
     return {"repo_name": req.repo_name, "output": output}
 
 
+@app.post("/api/environments/{env_id}/sync")
+async def sync_env(env_id: str) -> dict:
+    """Run `uv sync` for the env's project. Called from the sidebar
+    Sync button; idempotent if the venv already matches pyproject.toml."""
+    csvc = _require_running_env(env_id)
+    output = csvc.sync_env(env_id)
+    return {"output": output}
+
+
+@app.post("/api/environments/{env_id}/format")
+async def format_code(env_id: str, req: dict) -> dict:
+    """Format a code snippet via `ruff format` inside the env container.
+
+    Body: ``{"code": "..."}``. Returns ``{"formatted": "...", "error": null}``
+    on success or ``{"formatted": <original>, "error": "..."}`` on
+    failure. The caller is responsible for deciding whether to
+    replace the cell content.
+    """
+    code = (req or {}).get("code", "")
+    if not isinstance(code, str):
+        raise HTTPException(status_code=400, detail="code must be a string")
+    csvc = _require_running_env(env_id)
+    formatted, error = csvc.format_code(env_id, code)
+    return {"formatted": formatted, "error": error}
+
+
 @app.get("/api/environments/{env_id}/repos/install-stream")
 async def install_repo_stream(
     env_id: str, repo_name: str,

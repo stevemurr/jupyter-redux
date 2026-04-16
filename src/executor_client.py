@@ -23,6 +23,13 @@ class ExecutorClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
+    @property
+    def is_connected(self) -> bool:
+        """True if the client holds a live writer. Used by the WS layer
+        to detect stale executor references (e.g. after a force_stop in
+        another notebook tore the client down)."""
+        return self._writer is not None
+
     async def connect(self) -> None:
         for attempt in range(CONNECT_RETRIES):
             try:
